@@ -10,11 +10,11 @@ from trl import AutoModelForCausalLMWithValueHead
 from huggingface_hub import hf_hub_download
 
 parser = argparse.ArgumentParser()
-parser.add_argument('--base_model_path', default='/root/autodl-tmp/chinese_llama_plus_7b',
+parser.add_argument('--base_model_path', default=None,
                     type=str, help="Please specify a base_model")
-parser.add_argument('--adpter_model', default='/root/autodl-tmp/rm_test2/checkpoint-80',
+parser.add_argument('--adpter_model', default=None,
                     type=str, help="Please specify LoRA models to be merged (ordered); use commas to separate multiple LoRA models.")
-parser.add_argument('--output_dir', default='/root/autodl-tmp/rm_test3/', type=str)
+parser.add_argument('--output_dir', default=None, type=str)
 
 
 def transpose(weight, fan_in_fan_out):
