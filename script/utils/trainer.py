@@ -1,9 +1,12 @@
 import os,sys,logging
 import torch
+from torch import nn
 from transformers import Trainer,PreTrainedModel
 from transformers.modeling_utils import unwrap_model
-from typing import Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple, Union
 from peft import get_peft_model,get_peft_model_state_dict
+from transformers.trainer_pt_utils import nested_detach
+
 
 logger = logging.getLogger(__name__)
 
@@ -14,9 +17,6 @@ TRAINING_ARGS_NAME = "training_args.bin"
 
 
 class PeftTrainer(Trainer):
-    def __init__(self, args, **kwargs):
-        super().__init__(**kwargs)
-        self.args = args 
 
     def _save(self, output_dir: Optional[str] = None, state_dict=None):
         # If we are executing this function, we are the process zero, so we don't check for that.
@@ -49,18 +49,37 @@ class PeftTrainer(Trainer):
         torch.save(self.args, os.path.join(output_dir, TRAINING_ARGS_NAME))
 
 
+class RMPeftTrainer(PeftTrainer):
 
+    def compute_loss(self, model, inputs, return_outputs=False):
+        accept = model(input_ids=inputs['accept_ids'], attention_mask=inputs['accept_attention_mask'])
+        reject = model(input_ids=inputs['reject_ids'], attention_mask=inputs['reject_attention_mask'])
+        loss = -torch.nn.functional.logsigmoid(accept - reject).mean()
+        outputs = {"accept_ids": accept, "reject_ids": reject}
 
+        return (loss, outputs) if return_outputs else loss
 
+    def prediction_step(self, model, inputs, prediction_loss_only, ignore_keys):
+        inputs = self._prepare_inputs(inputs)
+        if ignore_keys is None:
+            if hasattr(self.model, "config"):
+                ignore_keys = getattr(self.model.config, "keys_to_ignore_at_inference", [])
+            else:
+                ignore_keys = []
 
+        with torch.no_grad():
+            loss, outputs = self.compute_loss(model, inputs, return_outputs=True)
+        loss = loss.detach()
+        logits = tuple(v for k, v in outputs.items() if k not in ignore_keys + ["loss"])
 
+        if prediction_loss_only:
+            return (loss, None, None)
 
+        logits = nested_detach(logits)
+        logits = torch.stack(logits).mean(dim=2).softmax(dim=0).T
+        labels = torch.zeros(logits.shape[0])
 
-
-
-
-
-
+        return loss, logits, labels
 
 
 
