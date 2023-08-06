@@ -1,15 +1,13 @@
 
-deepspeed_config_file=ds.json
 pretrained_model=chinese_llama_path
-dataset_dir=sft_data_path
-data_cache_dir=dataset_dir/cache/data
+dataset_dir=/root/Chinese-LLaMA-Tuning/sft_data
+data_cache_dir=/root/Chinese-LLaMA-Tuning/sft_data/cache/data
 lora_trainable="q_proj,v_proj,k_proj,o_proj,gate_proj,down_proj,up_proj"
 output_dir=sft_model_path
-# peft_model=sft_lora_model
-modules_to_save="embed_tokens,lm_head"
+peft_path=sft_lora_model
+modules_to_save=None
 
-torchrun --nnodes 1 --nproc_per_node 2 run_sft_with_peft.py \
-    --deepspeed ${deepspeed_config_file} \
+torchrun --nnodes 1 --nproc_per_node 1 run_sft_with_peft.py \
     --model_type llama \
     --model_name_or_path ${pretrained_model} \
     --dataset_dir ${dataset_dir} \
@@ -18,7 +16,7 @@ torchrun --nnodes 1 --nproc_per_node 2 run_sft_with_peft.py \
     --block_size 512 \
     --per_device_train_batch_size 2 \
     --per_device_eval_batch_size 2 \
-    --preprocessing_num_workers 16 \
+    --dataloader_num_workers 16 \
     --gradient_accumulation_steps 8 \
     --do_train \
     --do_eval \
@@ -46,6 +44,4 @@ torchrun --nnodes 1 --nproc_per_node 2 run_sft_with_peft.py \
     --lora_dropout 0.05 \
     --modules_to_save ${modules_to_save} \
     --torch_dtype float16 \
-    --gradient_checkpointing \
-    --ddp_find_unused_parameters False \
-    
+    --report_to "wandb"

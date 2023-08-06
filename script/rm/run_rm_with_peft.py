@@ -1,94 +1,109 @@
-import os,sys,torch
+import os,sys,torch,logging,math
 import numpy as np
 from typing import Dict
 import transformers
-from utils.parser_args import parser_arguments
-from transformers import AutoConfig,AutoTokenizer,LlamaForCausalLM,LlamaTokenizer,Trainer,DataCollatorWithPadding,AutoModelForCausalLM
-import logging 
+from transformers import AutoConfig,AutoTokenizer,LlamaForCausalLM,LlamaTokenizer,Trainer,DataCollatorWithPadding,AutoModelForCausalLM,BitsAndBytesConfig
+
+sys.path.append("..")
 from peft import LoraConfig,PeftModel,TaskType,get_peft_model
 from pathlib import Path 
 from datasets import load_dataset,concatenate_datasets
 from itertools import chain
+from utils.parser_args import parser_arguments
 from utils.metrics import compute_metrics
-import math 
 from utils.trainer import PeftTrainer,RMPeftTrainer
 from trl import AutoModelForCausalLMWithValueHead
 from utils.data_collator import RMDataCollatorWithPadding
-from deepspeed.compression.helper import recursive_getattr, recursive_setattr
 
 logger = logging.getLogger(__name__)
 MODEL_CLASSES = {
-    "llama": (AutoConfig, LlamaTokenizer, LlamaForCausalLM),
-    "auto": (AutoConfig, AutoTokenizer, AutoModelForCausalLM),
+    "llama": (AutoConfig, LlamaTokenizer, AutoModelForCausalLMWithValueHead),
+    "auto": (AutoConfig, AutoTokenizer, AutoModelForCausalLMWithValueHead),
 }
 
 
 def main():
     
     model_args, data_args, training_args = parser_arguments(logger)
-    # Set seed before initializing model.
     transformers.set_seed(training_args.seed)
 
     ## load model 
+    config_class, tokenizer_class, model_class = MODEL_CLASSES[model_args.model_type]
     if model_args.tokenizer_name_or_path is None:
-        tokenizer = LlamaTokenizer.from_pretrained(model_args.model_name_or_path, use_fast=model_args.use_fast_tokenizer)
+        tokenizer = tokenizer_class.from_pretrained(model_args.model_name_or_path, use_fast=model_args.use_fast_tokenizer)
     else:
-        tokenizer = LlamaTokenizer.from_pretrained(model_args.tokenizer_name_or_path, use_fast=model_args.use_fast_tokenizer)
+        tokenizer = tokenizer_class.from_pretrained(model_args.tokenizer_name_or_path, use_fast=model_args.use_fast_tokenizer)
     tokenizer.pad_token_id = 0 if tokenizer.pad_token_id is None else tokenizer.pad_token_id # set as the <unk> token
 
-    model = AutoModelForCausalLMWithValueHead.from_pretrained(
-        pretrained_model_name_or_path=model_args.model_name_or_path
-    )
-    # for name, module in model.named_modules():
-    #     print(name)
-    # for param in model.parameters():
-    #     if param.requires_grad:
-    #         print(param)
+    config_kwargs = {
+        "trust_remote_code": True,
+        "torch_dtype": model_args.torch_dtype if model_args.torch_dtype in ["auto", None] else getattr(torch, model_args.torch_dtype),
+        "low_cpu_mem_usage": True
+    }
+    if model_args.load_in_4bit:
+        config_kwargs["load_in_4bit"] = True
+        config_kwargs["quantization_config"] = BitsAndBytesConfig(
+            load_in_4bit=True,
+            bnb_4bit_compute_dtype=torch.bfloat16,
+            bnb_4bit_use_double_quant=True,
+            bnb_4bit_quant_type="nf4"
+        )
 
-    if training_args.peft_path is not None:
-        logger.info(f"Load pre-trained model: {training_args.peft_path}" )
-        model = PeftModel.from_pretrained(model, training_args.peft_path)
+    model = model_class.from_pretrained(
+        pretrained_model_name_or_path=model_args.model_name_or_path,
+        from_tf=bool(".ckpt" in model_args.model_name_or_path),
+        **config_kwargs
+    )
+
+    if model_args.peft_path is not None:
+        logger.info(f"Load pre-trained model: {model_args.peft_path}" )
+        model = PeftModel.from_pretrained(model, model_args.peft_path)
     else:
         logger.info("Init new peft model")
         lora_config = LoraConfig(
+            task_type=TaskType.CAUSAL_LM,      
             inference_mode=False,
             target_modules=training_args.lora_target.split(','),
             r=training_args.lora_rank,
             lora_alpha=training_args.lora_alpha,
             lora_dropout=training_args.lora_dropout,
-            modules_to_save=training_args.modules_to_save.split(',') if training_args.modules_to_save is not None else None
         )
         model = get_peft_model(model, peft_config=lora_config)
+        
+    for name, param in model.named_parameters():
+        if 'v_head' in name:
+            param.requires_grad = True 
     model.print_trainable_parameters()
-    # for name, module in model.named_modules():
-    #     print(name)
-    # model = model.half()
+
 
     def process_tokenize(examples):
         model_inputs = {"input_ids": []} 
         for instruction, input, output in zip(examples['instruction'], examples['input'], examples['output']):
             if input is not None and input != "":
                 instruction = instruction + '\n' + input 
-            source_ids = tokenizer.encode_plus(text=instruction, add_special_tokens=False)
-            accepts_ids = tokenizer.encode_plus(text=output[0], add_special_tokens=False)
-            rejects_ids = tokenizer.encode_plus(text=output[1], add_special_tokens=False)
+            source_ids = tokenizer.encode(text=instruction, add_special_tokens=False)
+            accepts_ids = tokenizer.encode(text=output[0], add_special_tokens=False)
+            rejects_ids = tokenizer.encode(text=output[1], add_special_tokens=False)
 
-            accepts_ids = source_ids["input_ids"] + [tokenizer.bos_token_id] + accepts_ids["input_ids"] + [tokenizer.eos_token_id]
-            rejects_ids = source_ids["input_ids"] + [tokenizer.bos_token_id] + rejects_ids["input_ids"] + [tokenizer.eos_token_id]
+            accepts_ids = source_ids + [tokenizer.bos_token_id] + accepts_ids + [tokenizer.eos_token_id]
+            rejects_ids = source_ids + [tokenizer.bos_token_id] + rejects_ids + [tokenizer.eos_token_id]
 
-            if len(accepts_ids) > training_args.max_length:
-                accepts_ids = accepts_ids[:training_args.max_length]
+            part_max_length = training_args.max_length // 2
+            if len(accepts_ids) > part_max_length:
+                accepts_ids = accepts_ids[:part_max_length]
             else:
-                accepts_ids += [tokenizer.pad_token_id] * (training_args.max_length - len(accepts_ids))
+                accepts_ids += [tokenizer.pad_token_id] * (part_max_length - len(accepts_ids))
 
-            if len(rejects_ids) > training_args.max_length:
-                rejects_ids = rejects_ids[:training_args.max_length]
+            if len(rejects_ids) > part_max_length:
+                rejects_ids = rejects_ids[:part_max_length]
             else:
-                rejects_ids += [tokenizer.pad_token_id] * (training_args.max_length - len(rejects_ids))
+                rejects_ids += [tokenizer.pad_token_id] * (part_max_length - len(rejects_ids))
 
-            input_ids = accepts_ids + rejects_ids
-            model_inputs["input_ids"].append(input_ids)
+            input_ids = accepts_ids + rejects_ids 
+            if len(input_ids) > 0:
+                model_inputs["input_ids"].append(input_ids)
         return model_inputs
+
 
     ### process_dataset
     logger.info("process datasets")
@@ -108,7 +123,7 @@ def main():
                 tokenized_data = raw_dataset.shuffle().map(
                     process_tokenize,
                     batched=True,
-                    num_proc=data_args.preprocessing_num_workers,
+                    num_proc=training_args.dataloader_num_workers,
                     remove_columns=["instruction","input","output"],
                     load_from_cache_file=True
                 )
@@ -129,7 +144,7 @@ def main():
             all_datasets['train'] = raw_train_datasets.shuffle().map(
                 process_tokenize,
                 batched=True,
-                num_proc=data_args.preprocessing_num_workers,
+                num_proc=training_args.dataloader_num_workers,
                 remove_columns=["instruction","input","output"],
                 load_from_cache_file=True
             )['train']
@@ -141,7 +156,7 @@ def main():
             all_datasets['test'] = raw_valid_datasets.shuffle().map(
                 process_tokenize,
                 batched=True,
-                num_proc=data_args.preprocessing_num_workers,
+                num_proc=training_args.dataloader_num_workers,
                 remove_columns=["instruction","input","output"],
                 load_from_cache_file=True
             )['train']
@@ -157,11 +172,11 @@ def main():
         train_dataset=all_datasets['train'] if training_args.do_train else None,
         eval_dataset=all_datasets['test'] if training_args.do_eval else None,
         tokenizer=tokenizer,
-        data_collator=RMDataCollatorWithPadding(tokenizer=tokenizer)
+        data_collator=RMDataCollatorWithPadding(tokenizer=tokenizer),
+
     )
 
     if training_args.do_train:
-        # with torch.cuda.amp.autocast():
         output = trainer.train()
         trainer.log_metrics("train", output.metrics)
         trainer.save_metrics("train", output.metrics)

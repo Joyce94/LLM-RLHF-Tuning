@@ -2,19 +2,17 @@ import sys,os,logging
 import transformers
 from transformers import HfArgumentParser,TrainingArguments
 from dataclasses import dataclass, field 
-from typing import Optional, Tuple
+from typing import List, Optional, Tuple
 import datasets 
-
-
 
 @dataclass
 class ModelArguments:
-    model_name_or_path: Optional[str] = field(default=None, metadata={"help": ""})
-    tokenizer_name_or_path: Optional[str] = field(default=None, metadata={"help": ""})
-    cache_dir: Optional[str] = field(default=None, metadata={"help": ""})
-    use_fast_tokenizer: Optional[bool] = field(default=False, metadata={"help": ""})
+    model_name_or_path: Optional[str] = field(default=None)
+    tokenizer_name_or_path: Optional[str] = field(default=None)
+    
+    use_fast_tokenizer: Optional[bool] = field(default=False)
     torch_dtype: Optional[str] = field(
-        default=None,
+        default="float16",
         metadata={
             "help": (
                 "Override the default `torch.dtype` and load the model under this dtype. If `auto` is passed, the "
@@ -24,7 +22,7 @@ class ModelArguments:
         },
     )
     model_type: Optional[str] = field(
-        default="auto",
+        default="opt",
         metadata={
             "help": (
                 "If training from scratch, pass a model type from the list"
@@ -32,25 +30,45 @@ class ModelArguments:
             "choices": ["auto", "llama"],
         },
     )
-    rm_model_path: Optional[str] = field(
+
+    load_in_4bit: bool = field(default=False)
+    peft_path : Optional[str] = field(default=None)
+
+    ## for ppo
+    reward_model_path: Optional[str] = field(
         default=None,
         metadata={"help": "Path to the directory containing the checkpoints of the reward model."}
+    )
+    reward_lora_path: Optional[str] = field(
+        default=None,
+        metadata={"help": "Path to the directory containing the checkpoints of the reward lora parameters."}
     )
     sft_model_path: Optional[str] = field(
         default=None,
-        metadata={"help": "Path to the directory containing the checkpoints of the reward model."}
+        metadata={"help": "Path to the directory containing the checkpoints of the sft model."}
     )
+    actor_model_path: Optional[str] = field(
+        default=None,
+        metadata={"help": "Path to the directory containing the checkpoints of the actor model."}
+    )
+    critic_model_path: Optional[str] = field(
+        default=None,
+        metadata={"help": "Path to the directory containing the checkpoints of the critic model."}
+    )
+
+    actor_peft_path : Optional[str] = field(default=None)
+    critic_peft_path : Optional[str] = field(default=None)
+    
 
 @dataclass
 class DataTrainingArguments:
-    dataset_dir: Optional[str] = field(default=None, metadata={"help": ""})
-    data_cache_dir: Optional[str] = field(default="./", metadata={"help": "The datasets processed stored"})
-    preprocessing_num_workers: Optional[int] = field(
-        default=None,
-        metadata={"help": "The number of processes to use for the preprocessing."}
-    )
+    dataset_dir: Optional[str] = field(default=None)
+    pretrain_dataset_dir: Optional[str] = field(default=None)
+
+    data_cache_dir: Optional[str] = field(default="./")
+
     block_size: Optional[int] = field(
-        default=None,
+        default=512,
         metadata={
             "help": (
                 "Optional input sequence length after tokenization. "
@@ -72,26 +90,101 @@ class DataTrainingArguments:
     overwrite_cache: bool = field(
         default=False, metadata={"help": "Overwrite the cached training and evaluation sets"}
     )
-    preprocessing_num_workers: Optional[int] = field(
-        default=None,
-        metadata={"help": "The number of processes to use for the preprocessing."},
-    )
 
+    
 
 @dataclass
 class FinetuningArguments(TrainingArguments):
-
+    
+    dataloader_num_workers: Optional[int] = field(
+        default=8,
+        metadata={"help": "The number of processes to use for the preprocessing."},
+    )
+    max_length: Optional[int] = field(default=512)
+    
+    report_to: Optional[List[str]] = field(
+        default=None, 
+        metadata={
+            "choices": ["wandb"]
+        }
+    )
+    
+    ######## for rm 
     lora_rank: Optional[int] = field(default=8)
     lora_dropout: Optional[float] = field(default=0.1)
     lora_alpha: Optional[float] = field(default=32.)
     lora_target: Optional[str] = field(
         default="q_proj,v_proj",
-        metadata={"help": "Name(s) of target modules to apply LoRA. Use comma to separate multiple modules. \
-                  LLaMA choices: [\"q_proj\", \"k_proj\", \"v_proj\", \"o_proj\", \"up_proj\", \"down_proj\"], \
-                  BLOOM choices: [\"query_key_value\", \"dense\", \"dense_\"]"}
+        metadata={"help": "Name(s) of target modules to apply LoRA. \
+                  LLaMA choices: [\"q_proj\", \"k_proj\", \"v_proj\", \"o_proj\", \"up_proj\", \"down_proj\"]"}
     )
-    modules_to_save : Optional[str] = field(default=None)
-    peft_path : Optional[str] = field(default=None)
+    modules_to_save: Optional[str] = field(default=None)
+
+    output_dir: Optional[str] = field(default=None)
+
+    ######## for ppo 
+    
+    critic_output_dir: Optional[str] = field(default=None)
+
+    max_prompt_length: Optional[int] = field(default=256)
+    max_response_length: Optional[int] = field(default=256)
+    min_response_length: Optional[int] = field(default=10)
+
+    ds_zero_stage: Optional[int] = field(default=3)
+    offload: Optional[bool] = field(default=False)
+
+    actor_lr: Optional[float] = field(
+        default=1e-5,
+    )
+    actor_lora_rank: Optional[int] = field(default=8)
+    actor_lora_dropout: Optional[float] = field(default=0.1)
+    actor_lora_alpha: Optional[float] = field(default=32.)
+    actor_lora_target: Optional[str] = field(
+        default="q_proj,v_proj",
+        metadata={"help": "Name(s) of target modules to apply LoRA. \
+                  LLaMA choices: [\"q_proj\", \"k_proj\", \"v_proj\", \"o_proj\", \"up_proj\", \"down_proj\"]"}
+    )
+    actor_modules_to_save: Optional[str] = field(default=None)
+    actor_weight_decay: Optional[float] = field(default=0.)
+
+    critic_lr: Optional[float] = field(
+        default=1e-5,
+        metadata={"help": ""}
+    )
+    critic_lora_rank: Optional[int] = field(default=8)
+    critic_lora_dropout: Optional[float] = field(default=0.1)
+    critic_lora_alpha: Optional[float] = field(default=32.)
+    critic_lora_target: Optional[str] = field(
+        default="q_proj,v_proj",
+        metadata={"help": "Name(s) of target modules to apply LoRA. \
+                  LLaMA choices: [\"q_proj\", \"k_proj\", \"v_proj\", \"o_proj\", \"up_proj\", \"down_proj\"]"}
+    )
+    critic_modules_to_save: Optional[str] = field(default=None)
+    critic_weight_decay: Optional[float] = field(default=0.)
+    
+
+    ppo_epochs: Optional[int] = field(default=1)
+
+    per_device_train_batch_size: Optional[int] = field(default=8, metadata={"help": "Batch size (per device) for the training dataloader and generation purpose."})
+    per_device_mini_train_batch_size: Optional[int] = field(default=8, metadata={"help": "Batch size (per device) for the training dataloader and generation purpose."})
+    mini_data_shuffle: Optional[bool] = field(default=False)
+
+    gamma: Optional[float] = field(default=1., metadata={"help": "Gamma parameter for advantage calculation"})
+    lam: Optional[float] = field(default=0.95, metadata={"help": "Lambda parameter for advantage calculation"})
+
+    kl_penalty_beta: Optional[float] = field(default=0.1)
+    reward_score_clip: Optional[float] = field(default=None)
+    value_clip: Optional[float] = field(default=0.2)
+    ratio_clip: Optional[float] = field(default=0.2)
+    
+    entropy_beta: Optional[float] = field(default=0.)
+    kl_loss_alpha: Optional[float] = field(default=0.)
+
+    actor_loss_weight: Optional[float] = field(default=1.)
+    critic_loss_weight: Optional[float] = field(default=1.)
+    pretrain_loss_weight: Optional[float] = field(default=1.)
+    pretrain_warmup_steps: Optional[int] = field(default=None)
+
 
 
 def parser_arguments(logger) -> Tuple[ModelArguments, DataTrainingArguments, FinetuningArguments]:
@@ -104,7 +197,6 @@ def parser_arguments(logger) -> Tuple[ModelArguments, DataTrainingArguments, Fin
         level=logging.INFO,  # if training_args.local_rank in [-1, 0] else logging.WARN,
         handlers=[logging.StreamHandler(sys.stdout)],)
     if training_args.should_log:
-        # The default of training_args.log_level is passive, so we set log level at info here to have that default.
         transformers.utils.logging.set_verbosity_info()
         
     log_level = training_args.get_process_log_level()
@@ -116,8 +208,8 @@ def parser_arguments(logger) -> Tuple[ModelArguments, DataTrainingArguments, Fin
 
     logger.warning(f"Model args: {model_args}")
     logger.warning(f"Data args: {data_args}")
-    logger.info(f"Training/evaluation parameters {training_args}")
-    # Log on each process the small summary:
+    logger.info(f"Training args: {training_args}")
+
     logger.warning(
         f"Process rank: {training_args.local_rank}, device: {training_args.device}, n_gpu: {training_args.n_gpu}"
         + f"distributed training: {bool(training_args.local_rank != -1)}, 16-bits training: {training_args.fp16}"

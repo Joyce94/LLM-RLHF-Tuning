@@ -1,5 +1,5 @@
 from sklearn.metrics import accuracy_score
-
+import numpy as np 
 
 def accuracy(predictions, references, normalize=True, sample_weight=None):
         return {
@@ -9,13 +9,10 @@ def accuracy(predictions, references, normalize=True, sample_weight=None):
         }
 
 def compute_metrics(eval_preds):
-    preds, labels = eval_preds
-    # preds have the same shape as the labels, after the argmax(-1) has been calculated
-    # by preprocess_logits_for_metrics but we need to shift the labels
-    labels = labels[:, 1:].reshape(-1)
-    preds = preds[:, :-1].reshape(-1)
+    preds, _ = eval_preds
+    preds = np.argmax(preds, axis=0).reshape(-1)
+    labels = np.zeros(preds.shape)
     return accuracy(predictions=preds, references=labels)
-
 
 
 

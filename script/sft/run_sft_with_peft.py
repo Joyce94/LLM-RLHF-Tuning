@@ -1,20 +1,20 @@
-import os,sys,torch
+import os,sys,torch,math
+import torch.nn as nn 
 import transformers
-from utils import parser_arguments
-from transformers import AutoConfig,AutoTokenizer,LlamaForCausalLM,LlamaTokenizer,Trainer,DataCollatorWithPadding,AutoModelForCausalLM
+from transformers import AutoConfig,AutoTokenizer,LlamaForCausalLM,LlamaTokenizer,Trainer,DataCollatorWithPadding,AutoModelForCausalLM,BitsAndBytesConfig
 import logging 
+
+sys.path.append('..')
+from utils.parser_args import parser_arguments
 from peft import LoraConfig,PeftModel,TaskType,get_peft_model,get_peft_model_state_dict
 from pathlib import Path 
 from datasets import load_dataset,concatenate_datasets
 from itertools import chain
-from utils.metrics import compute_metrics
-import math 
 from utils.trainer import PeftTrainer
 from utils.data_collator import DataCollatorForSupervisedDataset
 
 logger = logging.getLogger(__name__)
 IGNORE_INDEX = -100
-DEFAULT_PAD_TOKEN = "[PAD]"
 MODEL_CLASSES = {
     "llama": (AutoConfig, LlamaTokenizer, LlamaForCausalLM),
     "auto": (AutoConfig, AutoTokenizer, AutoModelForCausalLM),
@@ -24,41 +24,43 @@ MODEL_CLASSES = {
 def main():
 
     model_args, data_args, training_args = parser_arguments(logger)
-    # Set seed before initializing model.
     transformers.set_seed(training_args.seed)
 
     ## load model 
     config_class, tokenizer_class, model_class = MODEL_CLASSES[model_args.model_type]
-    config = config_class.from_pretrained(model_args.model_name_or_path)
-
     if model_args.tokenizer_name_or_path is None:
         tokenizer = tokenizer_class.from_pretrained(model_args.model_name_or_path, use_fast=model_args.use_fast_tokenizer)
     else:
         tokenizer = tokenizer_class.from_pretrained(model_args.tokenizer_name_or_path, use_fast=model_args.use_fast_tokenizer)
     # tokenizer.pad_token_id = 0 if tokenizer.pad_token_id is None else tokenizer.pad_token_id # set as the <unk> token
     if tokenizer.pad_token is None:
-        tokenizer.add_special_tokens(dict(pad_token=DEFAULT_PAD_TOKEN))
+        tokenizer.add_special_tokens(dict(pad_token='<PAD>'))
 
-    torch_dtype = (
-            model_args.torch_dtype
-            if model_args.torch_dtype in ["auto", None]
-            else getattr(torch, model_args.torch_dtype)
+    config_kwargs = {
+        "trust_remote_code": True,
+        "torch_dtype": model_args.torch_dtype if model_args.torch_dtype in ["auto", None] else getattr(torch, model_args.torch_dtype),
+        "low_cpu_mem_usage": True
+    }
+    if model_args.load_in_4bit:
+        config_kwargs["load_in_4bit"] = True
+        config_kwargs["quantization_config"] = BitsAndBytesConfig(
+            load_in_4bit=True,
+            bnb_4bit_compute_dtype=torch.bfloat16,
+            bnb_4bit_use_double_quant=True,
+            bnb_4bit_quant_type="nf4"
         )
+    
     model = model_class.from_pretrained(
         model_args.model_name_or_path,
         from_tf=bool(".ckpt" in model_args.model_name_or_path),
-        config=config,
-        cache_dir=model_args.cache_dir,
-        torch_dtype=torch_dtype,
-        low_cpu_mem_usage=True
+        **config_kwargs
     )
 
     model.resize_token_embeddings(len(tokenizer))
 
-
-    if training_args.peft_path is not None:
-        logger.info(f"Load pre-trained model: {training_args.peft_path}" )
-        model = PeftModel.from_pretrained(model, training_args.peft_path)
+    if model_args.peft_path is not None:
+        logger.info(f"Load pre-trained model: {model_args.peft_path}" )
+        model = PeftModel.from_pretrained(model, model_args.peft_path)
     else:
         logger.info("Init new peft model")
         lora_config = LoraConfig(
@@ -114,7 +116,7 @@ def main():
                 tokenized_data = raw_dataset.shuffle().map(
                     process_tokenize,
                     batched=True,
-                    num_proc=data_args.preprocessing_num_workers,
+                    num_proc=training_args.dataloader_num_workers,
                     remove_columns=["instruction","input","output"],
                     load_from_cache_file=True
                 )
@@ -136,7 +138,7 @@ def main():
             all_datasets['train'] = raw_train_datasets.shuffle().map(
                 process_tokenize,
                 batched=True,
-                num_proc=data_args.preprocessing_num_workers,
+                num_proc=training_args.dataloader_num_workers,
                 remove_columns=["instruction","input","output"],
                 load_from_cache_file=True
             )['train']
@@ -148,7 +150,7 @@ def main():
             all_datasets['test'] = raw_valid_datasets.shuffle().map(
                 process_tokenize,
                 batched=True,
-                num_proc=data_args.preprocessing_num_workers,
+                num_proc=training_args.dataloader_num_workers,
                 remove_columns=["instruction","input","output"],
                 load_from_cache_file=True
             )['train']

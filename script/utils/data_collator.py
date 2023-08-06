@@ -29,36 +29,31 @@ class DataCollatorForSupervisedDataset(object):
 
 class RMDataCollatorWithPadding(DataCollatorWithPadding):
     def __call__(self, instances: Sequence[Dict[str, Union[torch.Tensor, Sequence[int]]]]) -> Dict[str, torch.Tensor]:
-        accept_ids, reject_ids = tuple([torch.LongTensor(instance[key]) for instance in instances] for key in ("accept_ids", "reject_ids"))
 
-        accept_ids = torch.nn.utils.rnn.pad_sequence(
-            accept_ids, batch_first=True, padding_value=self.tokenizer.pad_token_id
-        )
-        reject_ids = torch.nn.utils.rnn.pad_sequence(
-            reject_ids, batch_first=True, padding_value=self.tokenizer.pad_token_id
-        )
-        return dict(
-            accept_ids=accept_ids,
-            reject_ids=reject_ids,
-            accept_attention_mask=accept_ids.ne(self.tokenizer.pad_token_id).long(),
-            reject_attention_mask=reject_ids.ne(self.tokenizer.pad_token_id).long(),
-        )
-
-
-class RLHFDataCollatorWithPadding(DataCollatorWithPadding):
-    def __call__(self, instances: List[Dict[str, Any]]) -> Dict[str, Any]:
-        self.tokenizer.pad_token_id
-        input_ids = [torch.LongTensor(instance["input_ids"].flip(1)) for instance in instances] ## flip 1 or 0 ?????
+        input_ids = [torch.LongTensor(instance["input_ids"]) for instance in instances]
         input_ids = torch.nn.utils.rnn.pad_sequence(
             input_ids, batch_first=True, padding_value=self.tokenizer.pad_token_id
         )
+        return dict(
+            input_ids=input_ids,
+            attention_mask=input_ids.ne(self.tokenizer.pad_token_id).long()
+        )
 
+
+class PPODataCollatorWithPadding(DataCollatorWithPadding):
+    def __call__(self, instances: List[Dict[str, Any]]) -> Dict[str, Any]:
+
+        input_ids = [torch.LongTensor(instance["input_ids"]).flip(0) for instance in instances] 
+        input_ids = torch.nn.utils.rnn.pad_sequence(
+            input_ids, batch_first=True, padding_value=self.tokenizer.pad_token_id
+        )
         return dict(
             input_ids=input_ids.flip(1),   
             attention_mask=input_ids.ne(self.tokenizer.pad_token_id).flip(1),
         )   # prompt 倒序 
 
-    
+        
+
 
 
 
