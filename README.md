@@ -34,7 +34,7 @@ trl==0.5.0
 ##### 支持训练方式
 - LoRA
 
-#### 训练细节
+### 训练细节
 ##### 指令微调模型
 - [训练指南](https://github.com/Joyce94/LLM-RLHF-Tuning/wiki/%E6%8C%87%E4%BB%A4%E5%BE%AE%E8%B0%83%E6%A8%A1%E5%9E%8B)
 
@@ -47,7 +47,13 @@ trl==0.5.0
 - [PPO算法实现细节](https://zhuanlan.zhihu.com/p/649665766)
 
 
-#### TODO
+### TODO
+- 支持DeepSpeed训练
+- PPO部分提升训练稳定性
+- 支持LLaMA-2模型
+- 支持BLOOM模型
+- 支持Baichuan模型
+- 支持QLoRA训练
 
 
 欢迎加群讨论 [WeChat](assets/RLHF讨论群.jpeg)
