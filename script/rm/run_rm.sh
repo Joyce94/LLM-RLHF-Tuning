@@ -1,7 +1,7 @@
 
 pretrained_model=chinese_alpaca_path
-dataset_dir=/root/Chinese-LLaMA-Tuning/rm_data
-data_cache_dir=/root/Chinese-LLaMA-Tuning/rm_data/cache/data
+dataset_dir=/root/LLM-RLHF-Tuning/rm_data
+data_cache_dir=/root/LLM-RLHF-Tuning/rm_data/cache/data
 lora_trainable="q_proj,v_proj,k_proj,o_proj,gate_proj,down_proj,up_proj"
 output_dir=rm_lora_path
 

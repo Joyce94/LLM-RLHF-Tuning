@@ -4,8 +4,8 @@ reward_lora_path=rm_lora_path
 actor_peft_path=output_dir_rlhf_actor
 critic_peft_path=output_dir_rlhf_critic
 
-dataset_dir=/root/Chinese-LLaMA-Tuning/sft_data
-pretrain_dataset_dir=/root/Chinese-LLaMA-Tuning/pt_data
+dataset_dir=/root/LLM-RLHF-Tuning/sft_data
+pretrain_dataset_dir=/root/LLM-RLHF-Tuning/pt_data
 actor_lora_trainable="q_proj,v_proj,k_proj,o_proj,gate_proj,down_proj,up_proj"    
 critic_lora_trainable="q_proj,v_proj,k_proj,o_proj,gate_proj,down_proj,up_proj"   
 

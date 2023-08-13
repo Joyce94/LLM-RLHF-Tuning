@@ -1,7 +1,7 @@
 
 pretrained_model=chinese_llama_path
-dataset_dir=/root/Chinese-LLaMA-Tuning/sft_data
-data_cache_dir=/root/Chinese-LLaMA-Tuning/sft_data/cache/data
+dataset_dir=/root/LLM-RLHF-Tuning/sft_data
+data_cache_dir=/root/LLM-RLHF-Tuning/sft_data/cache/data
 lora_trainable="q_proj,v_proj,k_proj,o_proj,gate_proj,down_proj,up_proj"
 output_dir=sft_model_path
 peft_path=sft_lora_model
