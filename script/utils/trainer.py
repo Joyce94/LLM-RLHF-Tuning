@@ -12,7 +12,6 @@ from trl import PPOTrainer, PPOConfig
 from trl.core import LengthSampler,PPODecorators,convert_to_scalar,stats_to_np,stack_dicts,logprobs_from_logits
 from trl.models import PreTrainedModelWrapper
 from peft.tuners.lora import LoraLayer 
-import wandb
 from tqdm import tqdm
 import time 
 import warnings
@@ -137,7 +136,7 @@ class RMPeftTrainer(PeftTrainer):
         if self.args.use_last_reward:
             loss1 = -torch.nn.functional.logsigmoid(accepts_end_token_value - rejects_end_token_value).mean()
         else:
-            ## need to multiply by mask, take out instruction part 
+            ## need to multiply by mask, take out instruction part
             loss1 = -torch.nn.functional.logsigmoid(accepts_value - rejects_value).mean()
             
         loss2 = self.args.clm_loss_weight * accepts_clm_loss
