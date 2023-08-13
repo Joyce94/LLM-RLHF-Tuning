@@ -20,7 +20,7 @@ MODEL_CLASSES = {
     "llama": (AutoConfig, LlamaTokenizer, AutoModelForCausalLMWithValueHead),
     "auto": (AutoConfig, AutoTokenizer, AutoModelForCausalLMWithValueHead),
 }
-
+IGNORE_INDEX = -100
 
 def main():
     
@@ -74,35 +74,42 @@ def main():
         if 'v_head' in name:
             param.requires_grad = True 
     model.print_trainable_parameters()
-
+    # trainable params: 19,992,577 || all params: 6,905,487,361 || trainable%: 0.28951724845536214
 
     def process_tokenize(examples):
-        model_inputs = {"input_ids": []} 
+        model_inputs = {"input_ids": [], "labels": []} 
         for instruction, input, output in zip(examples['instruction'], examples['input'], examples['output']):
             if input is not None and input != "":
                 instruction = instruction + '\n' + input 
-            source_ids = tokenizer.encode(text=instruction, add_special_tokens=False)
-            accepts_ids = tokenizer.encode(text=output[0], add_special_tokens=False)
-            rejects_ids = tokenizer.encode(text=output[1], add_special_tokens=False)
+            source = tokenizer.encode_plus(text=instruction, add_special_tokens=False)
+            accepts = tokenizer.encode_plus(text=output[0], add_special_tokens=False)
+            rejects = tokenizer.encode_plus(text=output[1], add_special_tokens=False)
 
-            accepts_ids = source_ids + [tokenizer.bos_token_id] + accepts_ids + [tokenizer.eos_token_id]
-            rejects_ids = source_ids + [tokenizer.bos_token_id] + rejects_ids + [tokenizer.eos_token_id]
+            accepts_ids = source["input_ids"] + [tokenizer.bos_token_id] + accepts["input_ids"] + [tokenizer.eos_token_id]
+            accepts_labels = [IGNORE_INDEX] * len(source["input_ids"]) + [tokenizer.bos_token_id] + accepts["input_ids"] + [tokenizer.eos_token_id]
+            rejects_ids = source["input_ids"] + [tokenizer.bos_token_id] + rejects["input_ids"] + [tokenizer.eos_token_id]
 
-            part_max_length = training_args.max_length // 2
-            if len(accepts_ids) > part_max_length:
-                accepts_ids = accepts_ids[:part_max_length]
-            else:
-                accepts_ids += [tokenizer.pad_token_id] * (part_max_length - len(accepts_ids))
+            if len(accepts_ids) > training_args.max_length:
+                accepts_ids = accepts_ids[:training_args.max_length]
+                accepts_labels = accepts_labels[:training_args.max_length]
+            if len(rejects_ids) > training_args.max_length:
+                rejects_ids = rejects_ids[:training_args.max_length]
+            
+            accepts_length, rejects_length = len(accepts_ids), len(rejects_ids)
+            max_length = max(accepts_length, rejects_length)
+            
+            accepts_ids = accepts_ids + [tokenizer.pad_token_id] * (max_length - accepts_length)
+            accepts_labels = accepts_labels + [IGNORE_INDEX] * (max_length - accepts_length)
+            rejects_ids = rejects_ids + [tokenizer.pad_token_id] * (max_length - rejects_length)
+            
+            inputs_ids = accepts_ids + rejects_ids
+            labels = accepts_labels + [0] * len(rejects_ids)
+            
+            model_inputs["input_ids"].append(inputs_ids)
+            model_inputs["labels"].append(labels)
 
-            if len(rejects_ids) > part_max_length:
-                rejects_ids = rejects_ids[:part_max_length]
-            else:
-                rejects_ids += [tokenizer.pad_token_id] * (part_max_length - len(rejects_ids))
-
-            input_ids = accepts_ids + rejects_ids 
-            if len(input_ids) > 0:
-                model_inputs["input_ids"].append(input_ids)
         return model_inputs
+
 
 
     ### process_dataset
@@ -120,7 +127,7 @@ def main():
                     cache_dir=data_args.data_cache_dir
                 )
 
-                tokenized_data = raw_dataset.shuffle().map(
+                tokenized_data = raw_dataset.map(
                     process_tokenize,
                     batched=True,
                     num_proc=training_args.dataloader_num_workers,
@@ -141,7 +148,7 @@ def main():
                 data_files=data_args.train_file,
                 cache_dir=data_args.data_cache_dir
             )
-            all_datasets['train'] = raw_train_datasets.shuffle().map(
+            all_datasets['train'] = raw_train_datasets.map(
                 process_tokenize,
                 batched=True,
                 num_proc=training_args.dataloader_num_workers,
@@ -153,7 +160,7 @@ def main():
                 data_files=data_args.validation_file,
                 cache_dir=data_args.data_cache_dir
             )
-            all_datasets['test'] = raw_valid_datasets.shuffle().map(
+            all_datasets['test'] = raw_valid_datasets.map(
                 process_tokenize,
                 batched=True,
                 num_proc=training_args.dataloader_num_workers,
@@ -173,7 +180,7 @@ def main():
         eval_dataset=all_datasets['test'] if training_args.do_eval else None,
         tokenizer=tokenizer,
         data_collator=RMDataCollatorWithPadding(tokenizer=tokenizer),
-
+        compute_metrics=compute_metrics,
     )
 
     if training_args.do_train:
@@ -182,18 +189,6 @@ def main():
         trainer.save_metrics("train", output.metrics)
         trainer.save_state()
         trainer.save_model()
-
-
-    if training_args.do_eval:
-        metrics = trainer.evaluate()
-        try:
-            perplexity = math.exp(metrics["eval_loss"])
-        except OverflowError:
-            perplexity = float("inf")
-        metrics["perplexity"] = perplexity
-
-        trainer.log_metrics("eval", metrics)
-        trainer.save_metrics("eval", metrics)
 
 
 if __name__ == "__main__":

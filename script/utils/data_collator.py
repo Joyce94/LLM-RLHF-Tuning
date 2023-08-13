@@ -26,17 +26,34 @@ class DataCollatorForSupervisedDataset(object):
             attention_mask=input_ids.ne(self.tokenizer.pad_token_id).long(),
         )
 
-
 class RMDataCollatorWithPadding(DataCollatorWithPadding):
     def __call__(self, instances: Sequence[Dict[str, Union[torch.Tensor, Sequence[int]]]]) -> Dict[str, torch.Tensor]:
 
-        input_ids = [torch.LongTensor(instance["input_ids"]) for instance in instances]
-        input_ids = torch.nn.utils.rnn.pad_sequence(
-            input_ids, batch_first=True, padding_value=self.tokenizer.pad_token_id
+        accepts_ids, accepts_labels, rejects_ids = [], [], []
+        for instance in instances:
+            length = len(instance["input_ids"]) // 2 
+            accepts_id = instance["input_ids"][:length]
+            rejects_id = instance["input_ids"][length:]
+            accepts_label = instance["labels"][:length]
+
+            accepts_ids.append(torch.LongTensor(accepts_id))
+            accepts_labels.append(torch.LongTensor(accepts_label))
+            rejects_ids.append(torch.LongTensor(rejects_id))
+            
+        accepts_input_ids = torch.nn.utils.rnn.pad_sequence(
+            accepts_ids, batch_first=True, padding_value=self.tokenizer.pad_token_id
         )
+        accepts_labels = torch.nn.utils.rnn.pad_sequence(accepts_labels, batch_first=True, padding_value=-100)
+        rejects_input_ids = torch.nn.utils.rnn.pad_sequence(
+            rejects_ids, batch_first=True, padding_value=self.tokenizer.pad_token_id
+        )
+
         return dict(
-            input_ids=input_ids,
-            attention_mask=input_ids.ne(self.tokenizer.pad_token_id).long()
+            accepts_input_ids=accepts_input_ids, 
+            accepts_labels=accepts_labels, 
+            accepts_attention_mask=accepts_input_ids.ne(self.tokenizer.pad_token_id).long(),
+            rejects_input_ids=rejects_input_ids,
+            rejects_attention_mask=rejects_input_ids.ne(self.tokenizer.pad_token_id).long(),
         )
 
 

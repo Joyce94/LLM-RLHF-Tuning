@@ -93,6 +93,10 @@ def main():
             input_ids = source_ids + [tokenizer.bos_token_id] + target_ids + [tokenizer.eos_token_id]
             labels = [IGNORE_INDEX] * len(source_ids) + [tokenizer.bos_token_id] + target_ids + [tokenizer.eos_token_id]
 
+            if len(input_ids) > training_args.max_length:
+                input_ids = input_ids[:training_args.max_length]
+                labels = labels[:training_args.max_length]
+
             model_inputs["input_ids"].append(torch.LongTensor(input_ids))
             model_inputs["labels"].append(torch.LongTensor(labels))
         
@@ -113,7 +117,7 @@ def main():
                     cache_dir=data_args.data_cache_dir
                 )
 
-                tokenized_data = raw_dataset.shuffle().map(
+                tokenized_data = raw_dataset.map(
                     process_tokenize,
                     batched=True,
                     num_proc=training_args.dataloader_num_workers,
@@ -135,7 +139,7 @@ def main():
                 data_files=data_args.train_file,
                 cache_dir=data_args.data_cache_dir
             )
-            all_datasets['train'] = raw_train_datasets.shuffle().map(
+            all_datasets['train'] = raw_train_datasets.map(
                 process_tokenize,
                 batched=True,
                 num_proc=training_args.dataloader_num_workers,
@@ -147,7 +151,7 @@ def main():
                 data_files=data_args.validation_file,
                 cache_dir=data_args.data_cache_dir
             )
-            all_datasets['test'] = raw_valid_datasets.shuffle().map(
+            all_datasets['test'] = raw_valid_datasets.map(
                 process_tokenize,
                 batched=True,
                 num_proc=training_args.dataloader_num_workers,

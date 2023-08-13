@@ -27,14 +27,14 @@ class PPOModel(nn.Module):
         self.actor_model = actor_model 
         self.critic_model = critic_model 
     
-    def forward(self, sequences, pretrain_inputs=None):
+    def forward(self, sequences, extra_inputs=None):
         actor_logits = self.actor_model(**sequences, return_dict=True).logits
         critic_values = self.critic_model(**sequences)[-1][:,:-1]
-        if pretrain_inputs is not None:
-            pretrain_loss = self.actor_model(**pretrain_inputs, return_dict=True).loss
+        if extra_inputs is not None:
+            extra_loss = self.actor_model(**extra_inputs, return_dict=True).loss
         else:
-            pretrain_loss = 0.0  
-        return actor_logits, critic_values, pretrain_loss
+            extra_loss = 0.0  
+        return actor_logits, critic_values, extra_loss
     
     
 class PPOPeftTrainer(Trainer):
@@ -48,8 +48,8 @@ class PPOPeftTrainer(Trainer):
         data_collator = None,
         train_dataset = None,
         tokenizer = None,
-        pretrain_train_dataset = None,
-        pretrain_data_collator = None, 
+        extra_train_dataset = None,
+        extra_data_collator = None, 
         optimizers: Tuple[torch.optim.Optimizer, torch.optim.lr_scheduler.LambdaLR] = (None, None),
         **kwargs
     ):
@@ -79,17 +79,17 @@ class PPOPeftTrainer(Trainer):
                                     )
         self.dataloader = self.accelerator.prepare(self.dataloader)
         
-        if pretrain_train_dataset is not None:
-            self.pretrain_train_dataloader = DataLoader(
-                pretrain_train_dataset,
+        if extra_train_dataset is not None:
+            self.extra_train_dataloader = DataLoader(
+                extra_train_dataset,
                 batch_size=self.args.per_device_train_batch_size,
-                collate_fn=pretrain_data_collator,
+                collate_fn=extra_data_collator,
                 num_workers=self.args.dataloader_num_workers,
                 shuffle=True,
             )
-            self.pretrain_train_dataloader = self.accelerator.prepare(self.pretrain_train_dataloader)
+            self.extra_train_dataloader = self.accelerator.prepare(self.extra_train_dataloader)
         else:
-            self.pretrain_train_dataloader = None 
+            self.extra_train_dataloader = None 
         
         self.tokenizer = tokenizer
         
@@ -108,7 +108,7 @@ class PPOPeftTrainer(Trainer):
         #         ds_plugin.hf_ds_config = HfTrainerDeepSpeedConfig(ds_plugin.hf_ds_config.config)
         #         ds_plugin.deepspeed_config = ds_plugin.hf_ds_config.config
         #         ds_plugin.hf_ds_config.trainer_config_process(self.args)
-
+        self.ppl_loss_fct = torch.nn.CrossEntropyLoss(reduction='none')
 
         self.model = PPOModel(actor_model, critic_model)
 
@@ -118,10 +118,10 @@ class PPOPeftTrainer(Trainer):
             self.optimizer = self.create_optimizer(self.actor_model, self.critic_model, self.args.actor_lr, self.args.critic_lr, self.args.actor_weight_decay, self.args.critic_weight_decay)
         
         ## get max_update_steps for lr_scheduler 
-        if self.pretrain_train_dataloader is None:
+        if self.extra_train_dataloader is None:
             self.max_dataloader_iters = len(self.dataloader)
         else:
-            self.max_dataloader_iters = min(len(self.dataloader), len(self.pretrain_train_dataloader))
+            self.max_dataloader_iters = min(len(self.dataloader), len(self.extra_train_dataloader))
         self.num_update_steps_per_epoch, self.max_update_steps = self.get_max_update_steps(args, self.max_dataloader_iters)
         
         if self.lr_scheduler is None:
@@ -244,35 +244,56 @@ class PPOPeftTrainer(Trainer):
         reward_score = []
         for i in range(batch_size):
             value = values[i]
-
             end_index = responses_mask[i].nonzero()[-1].detach().item()
             reward_score.append(value[end_index])
         return torch.stack(reward_score)
     
     
-    def get_probs(self, logits, labels):
+    def get_log_probs(self, logits, labels):
+        log_probs = F.log_softmax(logits, dim=-1)  
+        log_probs_labels = log_probs.gather(dim=-1, index=labels.unsqueeze(-1)) 
+        return log_probs_labels.squeeze(-1)
+
+    def get_entropy(self, logits, mask):
         probs = torch.nn.functional.softmax(logits, dim=-1)
         log_probs = F.log_softmax(logits, dim=-1)  
-        probs_labels = probs.gather(dim=-1, index=labels.unsqueeze(-1))
-        log_probs_labels = log_probs.gather(dim=-1, index=labels.unsqueeze(-1)) 
-        return probs, probs_labels.squeeze(-1), log_probs, log_probs_labels.squeeze(-1)
-
-
-    def compute_rewards_with_kl_penalty(self, reward_score, actor_log_probs, ref_log_probs, responses_mask):
+        entropy = self.masked_mean(-torch.sum(probs * log_probs, dim=-1), mask)
+        return entropy 
+        
+    
+    def compute_rewards_with_kl_penalty(self, ref_values, actor_log_probs, ref_log_probs, responses_mask):
+        masks = responses_mask[:, 1:] 
+        if self.args.use_last_reward:
+            reward_score = self.get_last_reward_score(ref_values, responses_mask)
+            
+        else:
+            reward_score = ref_values[:, :-1] * masks
         
         batch_size = reward_score.shape[0]
-        rewards_with_kl_penalty, r_kl_penalty = [], []
+        rewards_with_kl_penalty, kl_penalty_all = [], []
         for i in range(batch_size):
-            kl_penalty = -self.args.kl_penalty_beta * (actor_log_probs[i] - ref_log_probs[i])
-            r_kl_penalty.append(kl_penalty)
+            mask = masks[i]
             
-            end_index = responses_mask[i][1:].nonzero()[-1].detach().item()
-            if self.args.reward_score_clip is not None:
-                reward_score[i] = torch.clamp(reward_score[i], -self.args.reward_score_clip, self.args.reward_score_clip)
-            
-            kl_penalty[end_index] += reward_score[i]
+            kl = actor_log_probs[i] - ref_log_probs[i]
+            if self.args.kl_penalty_method == 'abs':
+                kl = torch.abs(kl)
+            elif self.args.kl_penalty_method == 'mse':
+                kl = kl ** 2 * 0.5 
+                
+            kl_penalty = - self.args.kl_penalty_beta * kl 
+            kl_penalty_all.append(kl_penalty)
+
+            if self.args.use_last_reward:
+                if self.args.reward_score_clip is not None:
+                    reward_score[i] = torch.clamp(reward_score[i], -self.args.reward_score_clip, self.args.reward_score_clip)
+                
+                end_index = mask.nonzero()[-1].detach().item()
+                kl_penalty[end_index] += reward_score[i]
+            else:
+                kl_penalty += reward_score[i]
+                
             rewards_with_kl_penalty.append(kl_penalty)
-        return torch.stack(rewards_with_kl_penalty), torch.stack(r_kl_penalty)
+        return torch.stack(rewards_with_kl_penalty), torch.stack(kl_penalty_all), reward_score 
     
     
     def get_advantages_and_returns(self, values, rewards, responses_mask):
@@ -323,31 +344,34 @@ class PPOPeftTrainer(Trainer):
             )
         
 
-        actor_logits, critic_values, _ = self.model(sequences)
-        actor_probs, actor_probs_labels, actor_log_probs, actor_log_probs_labels = self.get_probs(actor_logits[:, :-1, :], sequences["input_ids"][:, 1:])        
-        
+        actor_logits, critic_values, _ = self.model(sequences)  
         with self.actor_model.disable_adapter():
             ## the same as sft model 
             ref_logits = self.actor_model(**sequences, return_dict=True).logits
-            _, _, _, ref_log_probs_labels = self.get_probs(ref_logits[:, :-1, :], sequences["input_ids"][:, 1:]) 
             
         with self.critic_model.disable_adapter():
             ## the same as reward model 
-
+            ## save current critic model v_head 
             v_head_stat_dict = self.critic_model.v_head.state_dict()
             setattr(self.critic_model, "critic_head_weight", v_head_stat_dict["summary.weight"])
             setattr(self.critic_model, "critic_head_bias", v_head_stat_dict["summary.bias"])
-
+            ## change to reward model v_head
             self.critic_model.v_head.load_state_dict({"summary.weight": getattr(self.critic_model, "reward_head_weight"), "summary.bias": getattr(self.critic_model, "reward_head_bias")})
 
             ref_values = self.critic_model(**sequences)[-1]
+            ## back to critic model v_head 
             self.critic_model.v_head.load_state_dict({"summary.weight": getattr(self.critic_model, "critic_head_weight"), "summary.bias": getattr(self.critic_model, "critic_head_bias")})
         
+        
+        actor_log_probs = self.get_log_probs(actor_logits[:, :-1, :], sequences["input_ids"][:, 1:]) 
+        actor_ce = -self.masked_mean(actor_log_probs, sequences["attention_mask"][:, 1:], dim=-1)
+
+        ref_log_probs = self.get_log_probs(ref_logits[:, :-1, :], sequences["input_ids"][:, 1:]) 
+        ref_ce = -self.masked_mean(ref_log_probs, sequences["attention_mask"][:, 1:], dim=-1)
 
         responses_mask = self.get_responses_mask(sequences["attention_mask"], prompts_without_padding).to(self.device)
         
-        reward_score = self.get_last_reward_score(ref_values, responses_mask)    
-        rewards_with_kl_penalty, r_kl_penalty = self.compute_rewards_with_kl_penalty(reward_score, actor_log_probs_labels, ref_log_probs_labels, responses_mask)
+        rewards_with_kl_penalty, kl_penalty, reward_score = self.compute_rewards_with_kl_penalty(ref_values, actor_log_probs, ref_log_probs, responses_mask)
 
         critic_values = critic_values * responses_mask[:, 1:] 
         rewards_with_kl_penalty = rewards_with_kl_penalty * responses_mask[:, 1:]  
@@ -362,62 +386,53 @@ class PPOPeftTrainer(Trainer):
             responses_mask=responses_mask,
             sequences_ids=sequences["input_ids"],
             sequences_mask=sequences["attention_mask"],
-            ref_log_probs_labels=ref_log_probs_labels,
             actor_log_probs=actor_log_probs,
-            actor_log_probs_labels=actor_log_probs_labels,
-            actor_probs_labels=actor_probs_labels,
+            ref_log_probs=ref_log_probs,
             rewards_with_kl_penalty=rewards_with_kl_penalty,
             reward_score=reward_score,
-            r_kl_penalty=r_kl_penalty,
+            kl_penalty=kl_penalty,
             critic_values=critic_values,
             advantages=advantages,
-            returns=returns
+            returns=returns,
+            actor_ce=actor_ce,
+            ref_ce=ref_ce,
         )
 
-        
-    def get_mini_dataset(self, experience_data, batch_pretrain_data=None):
 
-        if self.args.mini_data_shuffle:
-            item = list(experience_data.items())
-            random.shuffle(item)
-            experience_data = dict(item)
+    def get_mini_dataset(self, data_buffer):
 
         mini_dataset = []
-        index = 0 
-        batch_size = experience_data["sequences_ids"].shape[0]
-
-        while index < batch_size:
-            dic = {}
-            for k, v in experience_data.items():
-                if k in ["prompts_ids", "responses_ids"]:
-                    dic[k] = v[index : index + self.args.per_device_mini_train_batch_size]
-                else:
-                    dic[k] = v[index : index + self.args.per_device_mini_train_batch_size].to(self.device)
-                    
-            if batch_pretrain_data is not None:
-                for k, v in batch_pretrain_data.items():
-                    dic[k] = v[index : index + self.args.per_device_mini_train_batch_size].to(self.device)
-            mini_dataset.append(dic)
-            index += self.args.per_device_mini_train_batch_size
-        
+        batch_size = data_buffer[0]["exp"]["sequences_ids"].shape[0]
+        for item in data_buffer:
+            experience_data, batch_extra_data = item['exp'], item['extra']
+            index = 0 
+            while index < batch_size:
+                dic = {}
+                for k, v in experience_data.items():
+                    if k in ["prompts_ids", "responses_ids"]:
+                        dic[k] = v[index : index + self.args.per_device_mini_train_batch_size]
+                    else:
+                        dic[k] = v[index : index + self.args.per_device_mini_train_batch_size].to(self.device)
+                        
+                if batch_extra_data is not None:
+                    for k, v in batch_extra_data.items():
+                        dic[k] = v[index : index + self.args.per_device_mini_train_batch_size].to(self.device)
+                
+                mini_dataset.append(dic)
+                index += self.args.per_device_mini_train_batch_size
+ 
         return mini_dataset 
         
         
-    def actor_loss(self, actor_log_probs_labels, actor_log_probs, mini_batch_actor_logits, sequences_ids, advantages, mask):
+    def actor_loss(self, actor_log_probs, mini_batch_actor_log_probs, advantages, mask):
         
-        mini_batch_actor_probs, mini_batch_actor_probs_labels, mini_batch_actor_log_probs, mini_batch_actor_log_probs_labels= self.get_probs(mini_batch_actor_logits[:, :-1, :], sequences_ids[:, 1:]) 
-
-        ratio = torch.exp((mini_batch_actor_log_probs_labels - actor_log_probs_labels) * mask)
-        loss1 = advantages * ratio
-        loss2 = advantages * torch.clamp(ratio, 1.0 - self.args.ratio_clip,
+        ratio = torch.exp((mini_batch_actor_log_probs - actor_log_probs) * mask)
+        loss1 = -advantages * ratio
+        loss2 = -advantages * torch.clamp(ratio, 1.0 - self.args.ratio_clip,
                                              1.0 + self.args.ratio_clip)
 
-        entropy = -torch.sum(mini_batch_actor_probs * mini_batch_actor_log_probs, dim=-1) * mask
-        kl_loss = torch.sum(mini_batch_actor_probs * (mini_batch_actor_log_probs - actor_log_probs), dim=-1) * mask 
-        loss = -torch.min(loss1, loss2) - self.args.entropy_beta * entropy + self.args.kl_loss_alpha * kl_loss
-
-        loss = self.masked_mean(loss, mask)
-        return loss, ratio, entropy, kl_loss 
+        loss = self.masked_mean(torch.max(loss1, loss2), mask)
+        return loss, ratio 
 
 
     def critic_loss(self, critic_values, mini_batch_critic_values, returns, mask):
@@ -490,37 +505,42 @@ class PPOPeftTrainer(Trainer):
         
         ## loss
         logs["loss/actor"] = batch["actor_loss"]
+        logs["loss/entropy"] = batch["entropy"]
         logs["loss/critic"] = batch["critic_loss"]
-        logs["loss/pretrain"] = batch["pretrain_loss"]
-        logs["loss/all"] = batch["all_loss"]
+        logs["loss/extra"] = batch["extra_loss"]
+        # logs["loss/all"] = batch["all_loss"]
         
-        ## experience_data
+        ## exp data
+        if not self.args.use_last_reward:
+            reward_score_mean = self.masked_mean(batch["reward_score"], mask)
+            reward_score_var = self.masked_var(batch["reward_score"], mask)
+        else:
+            reward_score_mean = torch.mean(batch["reward_score"])
+            reward_score_var = torch.var(batch["reward_score"])
+            
+        logs["exp_data/reward_score_mean"] = reward_score_mean
+        logs["exp_data/reward_score_var"] = reward_score_var 
+        
+        logs["exp_data/kl_penalty_mean"] = self.masked_mean(batch["kl_penalty"], mask)
+        logs["exp_data/kl_penalty_var"] = self.masked_var(batch["kl_penalty"], mask)
+
         logs["exp_data/rewards_with_kl_penalty_mean"] = self.masked_mean(batch["rewards_with_kl_penalty"], mask)
         logs["exp_data/rewards_with_kl_penalty_var"] = self.masked_var(batch["rewards_with_kl_penalty"], mask)
         
-        logs["exp_data/reward_score_mean"] = torch.mean(batch["reward_score"])
-        logs["exp_data/reward_score_var"] = torch.var(batch["reward_score"])
-        
-        logs["exp_data/r_kl_penalty_mean"] = self.masked_mean(batch["r_kl_penalty"], mask)
-        logs["exp_data/r_kl_penalty_var"] = self.masked_var(batch["r_kl_penalty"], mask)
-        
-        logs["exp_data/advantages_mean"] = self.masked_mean(batch["advantages"], mask)
-        logs["exp_data/advantages_var"] = self.masked_var(batch["advantages"], mask)
-        
-        logs["exp_data/returns_mean"] = self.masked_mean(batch["returns"], mask)
-        logs["exp_data/returns_var"] = self.masked_var(batch["returns"], mask)
+        logs["exp_data/actor_perplexity"] = math.exp(torch.mean(batch["actor_ce"]))
+        logs["exp_data/ref_perplexity"] = math.exp(torch.mean(batch["ref_ce"]))
         
         ## actor
+        logs["actor/advantages_mean"] = self.masked_mean(batch["advantages"], mask)
+        logs["actor/advantages_var"] = self.masked_var(batch["advantages"], mask)
+        
         logs["actor/ratio_mean"] = self.masked_mean(batch["ratio"], mask)
         logs["actor/ratio_var"] = self.masked_var(batch["ratio"], mask)
         
-        logs["actor/entropy_mean"] = self.masked_mean(batch["entropy"], mask)
-        logs["actor/entropy_var"] = self.masked_var(batch["entropy"], mask)
-        
-        logs["actor/kl_loss_mean"] = self.masked_mean(batch["kl_loss"], mask)
-        logs["actor/kl_loss_var"] = self.masked_var(batch["kl_loss"], mask)
-        
         ## critic
+        logs["critic/returns_mean"] = self.masked_mean(batch["returns"], mask)
+        logs["critic/returns_var"] = self.masked_var(batch["returns"], mask)
+
         logs["critic/values_error_mean"] = self.masked_mean(batch["values_error"], mask)
         logs["critic/values_error_var"] = self.masked_var(batch["values_error"], mask)
         
@@ -534,7 +554,8 @@ class PPOPeftTrainer(Trainer):
         return logs
 
 
-    def print_logs(self, all_logs, step):
+    def print_logs(self, all_logs, update_steps):
+
         all_logs_merged = {}
         for key in all_logs[0]:
             all_logs_merged[key] = torch.mean(torch.tensor([log[key] for log in all_logs])).to(self.device)
@@ -556,26 +577,76 @@ class PPOPeftTrainer(Trainer):
             logs = {}
             for k, v in all_logs_merged.items():
                 logs[k] = v.cpu().numpy().item()
-            self.accelerator.log(logs, step=step)
+            self.accelerator.log(logs, step=int(update_steps))
 
-            update_steps = step / self.args.gradient_accumulation_steps
             if update_steps > 0 and update_steps % self.args.logging_steps == 0:
-                actor_loss, critic_loss, pretrain_loss = logs["loss/actor"], logs["loss/critic"], logs["loss/pretrain"]
+                actor_loss, critic_loss, extra_loss = logs["loss/actor"], logs["loss/critic"], logs["loss/extra"]
                 rewards_with_kl_penalty_mean = logs["exp_data/rewards_with_kl_penalty_mean"]
                 lr = logs["lr"]
-                print(f'update_steps:{update_steps}|lr:{lr}|actor_loss:{actor_loss}, critic_loss:{critic_loss}, pretrain_loss:{pretrain_loss}, rewards_with_kl_penalty_mean:{rewards_with_kl_penalty_mean}')
+                print(f'update_steps:{update_steps}|lr:{lr}|actor_loss:{actor_loss}, critic_loss:{critic_loss}, extra_loss:{extra_loss}, rewards_with_kl_penalty_mean:{rewards_with_kl_penalty_mean}')
     
     
+    def train_step(self, batch_mini_data, extra_inputs, step):
+        
+        extra_loss_weight_warmup = self.args.extra_loss_weight
+        if self.args.extra_warmup_steps_ratio is not None:
+            extra_warmup_steps = int(self.args.extra_warmup_steps_ratio * self.max_steps)
+        ## get extra_loss_weight 
+        if self.args.extra_warmup_steps_ratio is not None:
+            if step < extra_warmup_steps:
+                extra_loss_weight_warmup = step / extra_warmup_steps * self.args.extra_loss_weight
+            else:
+                extra_loss_weight_warmup = extra_loss_weight_warmup ** 1.001 
+
+
+        responses_mask = batch_mini_data["responses_mask"]
+        sequences = {"input_ids": batch_mini_data["sequences_ids"], "attention_mask": batch_mini_data["sequences_mask"]}
+
+        with self.accelerator.accumulate(self.model):
+            mini_batch_actor_logits, mini_batch_critic_values, extra_loss = self.model(sequences, extra_inputs)
+
+        mini_batch_actor_log_probs = self.get_log_probs(mini_batch_actor_logits[:, :-1, :], batch_mini_data["sequences_ids"][:, 1:]) 
+        entropy = self.get_entropy(mini_batch_actor_logits[:, :-1, :], responses_mask[:, 1:])
+        
+        actor_loss, ratio = self.actor_loss(batch_mini_data["actor_log_probs"], mini_batch_actor_log_probs, batch_mini_data["advantages"], responses_mask[:, 1:])
+        
+        
+        critic_loss, values_error = self.critic_loss(batch_mini_data["critic_values"], mini_batch_critic_values, batch_mini_data["returns"], responses_mask[:, 1:])
+        
+        if extra_inputs is not None:
+            loss = self.args.actor_loss_weight * actor_loss + self.args.entropy_beta * entropy + self.args.critic_loss_weight * critic_loss + extra_loss_weight_warmup * extra_loss
+        else:
+            loss = self.args.actor_loss_weight * actor_loss + self.args.entropy_beta * entropy + self.args.critic_loss_weight * critic_loss
+        
+        self.accelerator.backward(loss)
+        self.optimizer.step()
+        if self.lr_scheduler is not None:
+            self.lr_scheduler.step()
+        self.optimizer.zero_grad()
+
+   
+        return dict(
+            all_loss=loss.detach(),
+            actor_loss=actor_loss.detach(),
+            critic_loss=critic_loss.detach(),
+            extra_loss=extra_loss.detach() if extra_inputs is not None else 0.0,
+            entropy=entropy.detach(),
+            ratio=ratio.detach(),
+            values_error=values_error.detach(),
+            
+        )
+        
+        
     def train(self):
 
         total_train_batch_size = (
             self.args.per_device_train_batch_size * self.args.gradient_accumulation_steps * self.args.world_size
         )
         num_examples = self.num_examples(self.dataloader)
-        if self.pretrain_train_dataloader is not None:
-            pretrain_data_num_examples = self.num_examples(self.pretrain_train_dataloader)
+        if self.extra_train_dataloader is not None:
+            extra_data_num_examples = self.num_examples(self.extra_train_dataloader)
         else:
-            pretrain_data_num_examples = 0 
+            extra_data_num_examples = 0 
         
         if self.args.max_steps > 0:
             self.num_train_epochs = self.args.max_steps // self.num_update_steps_per_epoch + int(
@@ -589,7 +660,7 @@ class PPOPeftTrainer(Trainer):
         if self.is_world_process_zero():
             # Train!
             logger.info("***** Running training *****")
-            logger.info(f"  Num examples = {num_examples}, Pretraining task examples = {pretrain_data_num_examples}")
+            logger.info(f"  Num examples = {num_examples}, Extra task examples = {extra_data_num_examples}")
             logger.info(f"  Num Epochs = {self.num_train_epochs:,}")
             logger.info(f"  Instantaneous batch size per device = {self.args.per_device_train_batch_size:,}")
             logger.info(f"  Total train batch size (w. parallel, distributed & accumulation) = {total_train_batch_size:,}")
@@ -599,14 +670,14 @@ class PPOPeftTrainer(Trainer):
 
         progress_bar = tqdm(total=self.max_steps, disable=not self.is_world_process_zero())
         step = 0 
+        data_buffer = list()
+        all_logs = list()
 
-        pretrain_loss_weight_warmup = self.args.pretrain_loss_weight
-            
         for epoch in range(int(self.num_train_epochs)):
-            if self.pretrain_train_dataloader is None:
-                self.pretrain_train_dataloader = [None] * len(self.dataloader)
+            if self.extra_train_dataloader is None:
+                self.extra_train_dataloader = [None] * len(self.dataloader)
             
-            for i, (batch_data, batch_pretrain_data) in enumerate(zip(self.dataloader, self.pretrain_train_dataloader)):
+            for i, (batch_data, batch_extra_data) in enumerate(zip(self.dataloader, self.extra_train_dataloader)):
                 if i >= self.max_dataloader_iters:
                     break 
 
@@ -614,78 +685,46 @@ class PPOPeftTrainer(Trainer):
                 experience_data = self.get_experience_data(prompts_ids)
                 
                 self.accelerator.wait_for_everyone()
-                mini_dataset = self.get_mini_dataset(experience_data, batch_pretrain_data)
-
-                self.actor_model.train()
-                self.critic_model.train()
-                
-                for ppo_epoch in range(self.args.ppo_epochs):
-                    all_logs = []
-                    for j, batch_mini_data in enumerate(mini_dataset):
-                        step += 1 
-                        ## calc pretrain_loss_weight 
-                        if self.args.pretrain_warmup_steps is not None:
-                            if step < self.args.pretrain_warmup_steps:
-                                pretrain_loss_weight_warmup = step / self.args.pretrain_warmup_steps * self.args.pretrain_loss_weight
-                            else:
-                                pretrain_loss_weight_warmup = pretrain_loss_weight_warmup ** 1.001 
-
-                        responses_mask = batch_mini_data["responses_mask"]
-                        sequences = {"input_ids": batch_mini_data["sequences_ids"], "attention_mask": batch_mini_data["sequences_mask"]}
-
-                        if batch_pretrain_data is not None:
-                            pretrain_inputs = {"input_ids": batch_mini_data["input_ids"], "labels": batch_mini_data["labels"]}
-                        else:
-                            pretrain_inputs = None 
-                            
-                        with self.accelerator.accumulate(self.model):
-                            
-                            mini_batch_actor_logits, mini_batch_critic_values, pretrain_loss = self.model(sequences, pretrain_inputs)
-
-                            actor_loss, ratio, entropy, kl_loss = self.actor_loss(batch_mini_data["actor_log_probs_labels"], batch_mini_data["actor_log_probs"], mini_batch_actor_logits, batch_mini_data["sequences_ids"], batch_mini_data["advantages"], responses_mask[:, 1:])
-                            
-                            critic_loss, values_error = self.critic_loss(batch_mini_data["critic_values"], mini_batch_critic_values, batch_mini_data["returns"], responses_mask[:, 1:])
-                            
-                            if pretrain_inputs is not None:
-                                loss = self.args.actor_loss_weight * actor_loss + self.args.critic_loss_weight * critic_loss + pretrain_loss_weight_warmup * pretrain_loss
-                            else:
-                                loss = self.args.actor_loss_weight * actor_loss + self.args.critic_loss_weight * critic_loss
-                            self.accelerator.backward(loss)
-                            
-                            self.optimizer.step()
-                            if self.lr_scheduler is not None:
-                                self.lr_scheduler.step()
-                            self.optimizer.zero_grad()
-                        
-                        progress_bar.update(1)
-
-                        batch_mini_data["actor_loss"] = actor_loss.detach()
-                        batch_mini_data["critic_loss"] = critic_loss.detach()
-                        
-                        batch_mini_data["all_loss"] = loss.detach()
-                        batch_mini_data["ratio"] = ratio.detach()
-                        batch_mini_data["entropy"] = entropy.detach()
-                        batch_mini_data["kl_loss"] = kl_loss.detach()
-                        batch_mini_data["values_error"] = values_error.detach()
-                        
-                        if pretrain_inputs is not None:
-                            batch_mini_data["pretrain_loss"] = pretrain_loss.detach()
-                        else:
-                            batch_mini_data["pretrain_loss"] = 0.0
-                        
-                        logs = self.record_logs(batch_mini_data)
-                        all_logs.append(logs)
-                        
-                        update_steps = step / self.args.gradient_accumulation_steps
-                        if update_steps > 0 and (update_steps % self.args.save_steps) == 0:
-                            if self.is_world_process_zero():
-                                self.save_checkpoint(self.actor_model, self.args.output_dir, int(update_steps))
-                                self.save_checkpoint(self.critic_model, self.args.critic_output_dir, int(update_steps))
-
-                    
-                    self.print_logs(all_logs, step)                
+                data_buffer.append({'exp': experience_data, 'extra': batch_extra_data})
+                if len(data_buffer) == self.args.mini_data_buffer_nums:
+                    mini_dataset = self.get_mini_dataset(data_buffer)
                     random.shuffle(mini_dataset) 
-                    torch.cuda.empty_cache()
+                    data_buffer.clear()
+
+                    self.actor_model.train()
+                    self.critic_model.train()
+                    
+                    for ppo_epoch in range(self.args.ppo_epochs):
+
+                        for j, batch_mini_data in enumerate(mini_dataset):
+                            step += 1 
+
+                            if batch_extra_data is not None:
+                                extra_inputs = {"input_ids": batch_mini_data["input_ids"], "labels": batch_mini_data["labels"]}
+                            else:
+                                extra_inputs = None 
+                        
+                        
+                            result = self.train_step(batch_mini_data, extra_inputs, step)
+                            batch_mini_data.update(result)
+                            
+                            progress_bar.update(1)
+
+                            logs = self.record_logs(batch_mini_data)
+                            all_logs.append(logs)
+                            
+                            update_steps = step / self.args.gradient_accumulation_steps
+                            
+                            if step > 0 and step % self.args.gradient_accumulation_steps == 0:
+                                self.print_logs(all_logs, update_steps) 
+                                all_logs.clear()
+                            if update_steps > 0 and (update_steps % self.args.save_steps) == 0:
+                                if self.is_world_process_zero():
+                                    self.save_checkpoint(self.actor_model, self.args.output_dir, int(update_steps))
+                                    self.save_checkpoint(self.critic_model, self.args.critic_output_dir, int(update_steps))
+
+                        random.shuffle(mini_dataset) 
+                        torch.cuda.empty_cache()
 
         progress_bar.close()
         self.accelerator.end_training()

@@ -1,18 +1,19 @@
 from sklearn.metrics import accuracy_score
 import numpy as np 
 
-def accuracy(predictions, references, normalize=True, sample_weight=None):
-        return {
-            "accuracy": float(
-                accuracy_score(references, predictions, normalize=normalize, sample_weight=sample_weight)
-            )
-        }
-
 def compute_metrics(eval_preds):
-    preds, _ = eval_preds
-    preds = np.argmax(preds, axis=0).reshape(-1)
+    predictions = eval_preds.predictions
+    preds = np.argmax(predictions, axis=1).reshape(-1)
     labels = np.zeros(preds.shape)
-    return accuracy(predictions=preds, references=labels)
+    value_mean = np.average(predictions, axis=0)
+    metric = {
+                "accuracy": float(
+                    accuracy_score(labels, preds, normalize=True)
+                ),
+                "accepts_end_token_value_mean": value_mean[0],
+                "rejects_end_token_value_mean": value_mean[1]
+            }
+    return metric
 
 
 

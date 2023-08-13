@@ -63,7 +63,7 @@ class ModelArguments:
 @dataclass
 class DataTrainingArguments:
     dataset_dir: Optional[str] = field(default=None)
-    pretrain_dataset_dir: Optional[str] = field(default=None)
+    extra_dataset_dir: Optional[str] = field(default=None)
 
     data_cache_dir: Optional[str] = field(default="./")
 
@@ -110,6 +110,9 @@ class FinetuningArguments(TrainingArguments):
     )
     
     ######## for rm 
+    clm_loss_weight: Optional[float] = field(default=0.)
+    use_last_reward: bool = field(default=False)
+    
     lora_rank: Optional[int] = field(default=8)
     lora_dropout: Optional[float] = field(default=0.1)
     lora_alpha: Optional[float] = field(default=32.)
@@ -129,9 +132,8 @@ class FinetuningArguments(TrainingArguments):
     max_prompt_length: Optional[int] = field(default=256)
     max_response_length: Optional[int] = field(default=256)
     min_response_length: Optional[int] = field(default=10)
-
-    ds_zero_stage: Optional[int] = field(default=3)
-    offload: Optional[bool] = field(default=False)
+    
+    mini_data_buffer_nums: Optional[int] = field(default=1)
 
     actor_lr: Optional[float] = field(
         default=1e-5,
@@ -173,6 +175,14 @@ class FinetuningArguments(TrainingArguments):
     lam: Optional[float] = field(default=0.95, metadata={"help": "Lambda parameter for advantage calculation"})
 
     kl_penalty_beta: Optional[float] = field(default=0.1)
+    kl_penalty_method: Optional[str] = field(
+        default=None,
+        metadata={
+            "choices": ["mse", "abs"],
+        }
+    )
+    
+    
     reward_score_clip: Optional[float] = field(default=None)
     value_clip: Optional[float] = field(default=0.2)
     ratio_clip: Optional[float] = field(default=0.2)
@@ -182,9 +192,18 @@ class FinetuningArguments(TrainingArguments):
 
     actor_loss_weight: Optional[float] = field(default=1.)
     critic_loss_weight: Optional[float] = field(default=1.)
-    pretrain_loss_weight: Optional[float] = field(default=1.)
-    pretrain_warmup_steps: Optional[int] = field(default=None)
+    extra_loss_weight: Optional[float] = field(default=1.)
+    extra_warmup_steps_ratio: Optional[float] = field(default=None)
 
+    extra_dataset_type: Optional[str] = field(
+        default=None,
+        metadata={
+            "choices": ["pretrain", "sft"],
+        }
+    )
+    ## for ds 
+    ds_zero_stage: Optional[int] = field(default=3)
+    offload: Optional[bool] = field(default=False)
 
 
 def parser_arguments(logger) -> Tuple[ModelArguments, DataTrainingArguments, FinetuningArguments]:

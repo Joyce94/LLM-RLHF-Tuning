@@ -109,7 +109,10 @@ class RMPeftTrainer(PeftTrainer):
             # Inspect model forward signature to keep only the arguments it accepts.
             signature = inspect.signature(self.model.forward)
             self._signature_columns = list(signature.parameters.keys())
-            # self._signature_columns += ["input_ids"]
+            logger.info(f"The following columns {self._signature_columns} are accepted.")
+            self._signature_columns += ["input_ids_accepts", "input_ids_rejects", "labels_accepts"]
+            logger.info(f"The following columns {self._signature_columns} are accepted.")
+            
             if "input_ids" not in self._signature_columns:
                 self._signature_columns += ["input_ids"]
                 logger.warning(
@@ -119,17 +122,35 @@ class RMPeftTrainer(PeftTrainer):
             self._signature_columns += list(set(["label", "label_ids"] + self.label_names))
 
     def compute_loss(self, model, inputs, return_outputs=False):
-        logits, _, value = model(**inputs)
-        attention_mask = inputs["attention_mask"]
-        value = value * attention_mask
-        accept, reject = value[:, :self.args.max_length // 2], value[:, self.args.max_length // 2:]
+        
+        _, accepts_clm_loss, accepts_value = model(input_ids=inputs["accepts_input_ids"], attention_mask=inputs["accepts_attention_mask"], labels=inputs["accepts_labels"], return_dict=True)
+        _, _, rejects_value = model(input_ids=inputs["rejects_input_ids"], attention_mask=inputs["rejects_attention_mask"], return_dict=True)
 
-        loss = -torch.nn.functional.logsigmoid(accept - reject).mean()
-        outputs = {"accept_ids": accept, "reject_ids": reject}
+        batch_size = accepts_value.shape[0]
+        accepts_seq_lengths = (torch.ne(inputs["accepts_input_ids"], self.tokenizer.pad_token_id).sum(-1) - 1).to(accepts_value.device)
+        rejects_seq_lengths = (torch.ne(inputs["rejects_input_ids"], self.tokenizer.pad_token_id).sum(-1) - 1).to(rejects_value.device)
+        
+        accepts_end_token_value = accepts_value[torch.arange(batch_size, device=accepts_value.device), accepts_seq_lengths]
+        rejects_end_token_value = rejects_value[torch.arange(batch_size, device=rejects_value.device), rejects_seq_lengths]
+        
+        
+        if self.args.use_last_reward:
+            loss1 = -torch.nn.functional.logsigmoid(accepts_end_token_value - rejects_end_token_value).mean()
+        else:
+            ## need to multiply by mask, take out instruction part 
+            loss1 = -torch.nn.functional.logsigmoid(accepts_value - rejects_value).mean()
+            
+        loss2 = self.args.clm_loss_weight * accepts_clm_loss
+        loss = loss1 + loss2 
+        
+        outputs = {"accepts_end_token_value": accepts_end_token_value, "rejects_end_token_value": rejects_end_token_value}
+
         return (loss, outputs) if return_outputs else loss
+    
 
     def prediction_step(self, model, inputs, prediction_loss_only, ignore_keys):
         inputs = self._prepare_inputs(inputs)
+
         if ignore_keys is None:
             if hasattr(self.model, "config"):
                 ignore_keys = getattr(self.model.config, "keys_to_ignore_at_inference", [])
@@ -139,14 +160,13 @@ class RMPeftTrainer(PeftTrainer):
         with torch.no_grad():
             loss, outputs = self.compute_loss(model, inputs, return_outputs=True)
         loss = loss.detach()
-        
         logits = tuple(v for k, v in outputs.items() if k not in ignore_keys + ["loss"])
         if prediction_loss_only:
             return (loss, None, None)
 
-        logits = nested_detach(logits)
-        logits = torch.stack(logits, dim=0).mean(dim=2).softmax(dim=0)
-        return loss, logits, None 
+        logits = torch.stack(logits, dim=1)
+        labels = torch.zeros(logits.shape[0]).to(logits.device)
+        return loss, logits, labels 
 
 
 
