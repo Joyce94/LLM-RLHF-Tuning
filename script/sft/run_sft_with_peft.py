@@ -97,8 +97,8 @@ def main():
                 input_ids = input_ids[:training_args.max_length]
                 labels = labels[:training_args.max_length]
 
-            model_inputs["input_ids"].append(torch.LongTensor(input_ids))
-            model_inputs["labels"].append(torch.LongTensor(labels))
+            model_inputs["input_ids"].append(input_ids)
+            model_inputs["labels"].append(labels)
         
         return model_inputs
 
