@@ -8,3 +8,4 @@ wandb=0.15.8
 peft==0.4.0
 torch==2.0.1
 trl==0.5.0
+deepspeed==0.10.0

@@ -29,8 +29,8 @@ accelerate launch --config_file ds_config.yaml run_ppo_with_peft.py \
     --lr_scheduler_type cosine \
     --learning_rate 1e-4 \
     --weight_decay 0 \
-    --logging_steps 1 \
-    --save_steps 1 \
+    --logging_steps 100 \
+    --save_steps 100 \
     --dataloader_num_workers 16 \
     --block_size 256 \
     --max_prompt_length 256 \
