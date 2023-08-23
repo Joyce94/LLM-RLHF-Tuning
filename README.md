@@ -13,7 +13,7 @@
 
 ### 更新
 - [23/8/23] 支持LLaMA2模型训练；支持DPO训练；支持基于一个基模型、选择一个或两个lora适配器训练PPO、支持accelerate、deepspeed训练
-- [23/8/10] 支持LLaMA模型训练；支持基于两个基模型、两个lora的适配器训练PPO；支持accelerate分布式训练
+- [23/8/13] 支持LLaMA模型训练；支持基于两个基模型、两个lora的适配器训练PPO；支持accelerate分布式训练
 
 
 ### 功能
@@ -79,10 +79,17 @@ deepspeed==0.10.0
 - [训练指南](https://github.com/Joyce94/LLM-RLHF-Tuning/wiki/DPO%E8%AE%AD%E7%BB%83)
 
 ## TODO
-- PPO提升训练稳定性，实现ppo-max
-- 支持BLOOM模型
-- 支持Baichuan模型
-- 支持QLoRA训练
+- [x] 支持LLaMA2模型
+- [x] 支持deepspeed训练
+- [x] 支持DPO训练
+- [ ] PPO提升训练稳定性，实现ppo-max
+- [ ] 支持DDPO训练
+- [ ] 支持[RRHF](https://github.com/GanjinZero/RRHF)
+- [ ] 支持[RAFT](https://github.com/OptimalScale/LMFlow)
+- [ ] 支持拒绝采样 RFT
+- [ ] 支持BLOOM模型
+- [ ] 支持Baichuan模型
+- [ ] 支持QLoRA训练
 
 
 欢迎加群讨论 [WeChat](assets/RLHF讨论群.jpeg)
