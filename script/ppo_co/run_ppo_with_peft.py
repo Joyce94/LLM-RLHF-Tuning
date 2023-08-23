@@ -13,13 +13,11 @@ from pathlib import Path
 from datasets import load_dataset,concatenate_datasets
 from itertools import chain
 from utils.data_collator import PPODataCollatorWithPadding,DataCollatorForSupervisedDataset
-from models import PPOEngine
+from co_models import PPOEngine_CO
 from ppo_trainer_with_peft import PPOPeftTrainer
 
-from torch.utils.data import DataLoader, RandomSampler
-from accelerate import Accelerator
-from torch.optim import AdamW
 from utils.utils import PROMPT_TEMPLATE
+
 
 logger = logging.getLogger(__name__)
 IGNORE_INDEX = -100
@@ -206,7 +204,7 @@ def main():
 
     ## load model 
     logger.info("load model")
-    ppo_engine = PPOEngine(model_args, training_args)
+    ppo_engine = PPOEngine_CO(model_args, training_args)
     
     data_collator = PPODataCollatorWithPadding(tokenizer)
     if data_args.extra_dataset_dir is not None:
@@ -220,8 +218,7 @@ def main():
 
     trainer = PPOPeftTrainer(
         args = training_args, 
-        actor_model = ppo_engine.actor_model,
-        critic_model = ppo_engine.critic_model,
+        co_model = ppo_engine.model,
         train_dataset = all_datasets,
         data_collator = data_collator,
         tokenizer = tokenizer,

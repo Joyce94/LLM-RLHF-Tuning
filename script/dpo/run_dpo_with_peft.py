@@ -1,20 +1,24 @@
-import os,sys,torch,logging,math
+import datetime
+import os,sys,torch,logging
 import numpy as np
 from typing import Dict
 import transformers
-from transformers import AutoConfig,AutoTokenizer,LlamaForCausalLM,LlamaTokenizer,Trainer,DataCollatorWithPadding,AutoModelForCausalLM,BitsAndBytesConfig
 
-sys.path.append("..")
-from peft import LoraConfig,PeftModel,TaskType,get_peft_model
+sys.path.append('..')
+
 from pathlib import Path 
+from utils.parser_args import parser_arguments
+from transformers import AutoConfig,AutoTokenizer,LlamaForCausalLM,LlamaTokenizer,Trainer,AutoModelForCausalLM,get_scheduler,default_data_collator,BitsAndBytesConfig
+
+from peft import LoraConfig,PeftModel,TaskType,get_peft_model
 from datasets import load_dataset,concatenate_datasets
 from itertools import chain
-from utils.parser_args import parser_arguments
-from utils.metrics import compute_metrics_for_pair
-from utils.trainer import PeftTrainer,RMPeftTrainer
-from trl import AutoModelForCausalLMWithValueHead
-from utils.data_collator import PairDataCollatorWithPadding
+from torch.utils.data import DataLoader, RandomSampler
+from torch.optim import AdamW
 from utils.utils import PROMPT_TEMPLATE
+from utils.data_collator import PairDataCollatorWithPadding
+from utils.trainer import DPOPeftTrainer
+from utils.metrics import compute_metrics_for_pair
 
 
 logger = logging.getLogger(__name__)
@@ -23,88 +27,6 @@ MODEL_CLASSES = {
     "llama": (AutoConfig, LlamaTokenizer, LlamaForCausalLM),
     "auto": (AutoConfig, AutoTokenizer, AutoModelForCausalLM),
 }
-
-
-
-def print_trainable_params(model: torch.nn.Module) -> None:
-    # Adopted from https://github.com/LLaMA-Efficient-Tuning-main/src/utils/other.py
-    trainable_params, all_param = 0, 0
-    for param in model.parameters():
-        num_params = param.numel()
-        # if using DS Zero 3 and the weights are initialized empty
-        if num_params == 0 and hasattr(param, "ds_numel"):
-            num_params = param.ds_numel
-        all_param += num_params
-        if param.requires_grad:
-            trainable_params += num_params
-    print("trainable params: {:d} || all params: {:d} || trainable%: {:.4f}".format(
-                trainable_params, all_param, 100 * trainable_params / all_param))
-
-
-
-def create_model(model_args, data_args, training_args):
-
-    ## load model 
-    config_class, tokenizer_class, model_class = MODEL_CLASSES[model_args.model_type]
-    if model_args.tokenizer_name_or_path is None:
-        tokenizer = tokenizer_class.from_pretrained(model_args.model_name_or_path, use_fast=model_args.use_fast_tokenizer)
-    else:
-        tokenizer = tokenizer_class.from_pretrained(model_args.tokenizer_name_or_path, use_fast=model_args.use_fast_tokenizer)
-    tokenizer.pad_token_id = 0 if tokenizer.pad_token_id is None else tokenizer.pad_token_id # set as the <unk> token
-
-    config_kwargs = {
-        "trust_remote_code": True,
-        "torch_dtype": model_args.torch_dtype if model_args.torch_dtype in ["auto", None] else getattr(torch, model_args.torch_dtype),
-        "low_cpu_mem_usage": True
-    }
-    if model_args.load_in_4bit:
-        config_kwargs["load_in_4bit"] = True
-        config_kwargs["quantization_config"] = BitsAndBytesConfig(
-            load_in_4bit=True,
-            bnb_4bit_compute_dtype=torch.bfloat16,
-            bnb_4bit_use_double_quant=True,
-            bnb_4bit_quant_type="nf4"
-        )
-
-    model = model_class.from_pretrained(
-        pretrained_model_name_or_path=model_args.model_name_or_path,
-        from_tf=bool(".ckpt" in model_args.model_name_or_path),
-        **config_kwargs
-    )
-
-    if model_args.peft_path is not None:
-        logger.info(f"Load pre-trained model: {model_args.peft_path}" )
-        model = PeftModel.from_pretrained(model, model_args.peft_path, is_trainable=True)
-        
-    else:
-        logger.info("Init new peft model")
-        lora_config = LoraConfig(
-            task_type=TaskType.CAUSAL_LM,      
-            inference_mode=False,
-            target_modules=training_args.lora_target.split(','),
-            r=training_args.lora_rank,
-            lora_alpha=training_args.lora_alpha,
-            lora_dropout=training_args.lora_dropout,
-        )
-        model = get_peft_model(model, peft_config=lora_config)
-    
-    model = AutoModelForCausalLMWithValueHead.from_pretrained(model)
-
-    if model_args.peft_path is not None:
-        lora_state_dict = torch.load(os.path.join(model_args.peft_path, 'adapter_model.bin'))
-        model.v_head.load_state_dict({
-                    "summary.weight": lora_state_dict["v_head.summary.weight"],
-                    "summary.bias": lora_state_dict["v_head.summary.bias"]
-                })
-        
-    print('*********************model*******************')
-    print_trainable_params(model)
-    
-    model.gradient_checkpointing_enable()
-    model.config.use_cache = False
-
-    return model, tokenizer
-    
 
 
 def process_data(model_args, data_args, training_args, tokenizer):
@@ -163,8 +85,6 @@ def process_data(model_args, data_args, training_args, tokenizer):
 
         return model_inputs
 
-
-
     ### process_dataset
     logger.info("process datasets")
     with training_args.main_process_first(desc="process datasets"):
@@ -177,6 +97,7 @@ def process_data(model_args, data_args, training_args, tokenizer):
                 raw_dataset = load_dataset(
                     "json",
                     data_files=data_path,
+                    cache_dir=data_args.data_cache_dir,
                 )
                 columns = list(raw_dataset.column_names.values())[0]
                 tokenized_data = raw_dataset.map(
@@ -226,7 +147,73 @@ def process_data(model_args, data_args, training_args, tokenizer):
                 "You can provide --dataset_dir or provide two files --train_file and --validation_file. "
             )
 
-    return all_datasets
+    return all_datasets 
+
+
+def create_model(model_args, data_args, training_args):
+    ## load model 
+    config_class, tokenizer_class, model_class = MODEL_CLASSES[model_args.model_type]
+    if model_args.tokenizer_name_or_path is None:
+        tokenizer = tokenizer_class.from_pretrained(model_args.model_name_or_path, use_fast=model_args.use_fast_tokenizer)
+    else:
+        tokenizer = tokenizer_class.from_pretrained(model_args.tokenizer_name_or_path, use_fast=model_args.use_fast_tokenizer)
+    tokenizer.pad_token_id = 0 if tokenizer.pad_token_id is None else tokenizer.pad_token_id # set as the <unk> token
+ 
+    config_kwargs = {
+        "trust_remote_code": True,
+        "torch_dtype": model_args.torch_dtype if model_args.torch_dtype in ["auto", None] else getattr(torch, model_args.torch_dtype),
+        "low_cpu_mem_usage": True
+    }
+    if model_args.load_in_4bit:
+        config_kwargs["load_in_4bit"] = True
+        config_kwargs["quantization_config"] = BitsAndBytesConfig(
+            load_in_4bit=True,
+            bnb_4bit_compute_dtype=torch.bfloat16,
+            bnb_4bit_use_double_quant=True,
+            bnb_4bit_quant_type="nf4"
+        )
+    
+    model = model_class.from_pretrained(
+        model_args.model_name_or_path,
+        from_tf=bool(".ckpt" in model_args.model_name_or_path),
+        **config_kwargs
+    )
+
+    model.resize_token_embeddings(len(tokenizer))
+    
+    # if hasattr(model, "enable_input_require_grads"):
+    #         model.enable_input_require_grads()
+    # else:
+    #     def make_inputs_require_grad(module, input, output):
+    #         output.requires_grad_(True)
+    #     model.get_input_embeddings().register_forward_hook(make_inputs_require_grad)
+
+    # model.enable_input_require_grads()
+    # model.gradient_checkpointing_enable()
+    # # model.lm_head = CastOutputToFloat(model.lm_head)        # ??????????   
+    # model.config.use_cache = False
+
+
+    if model_args.peft_path is not None:
+        logger.info(f"Load pre-trained model: {model_args.peft_path}" )
+        model = PeftModel.from_pretrained(model, model_args.peft_path)
+    else:
+        logger.info("Init new peft model")
+        lora_config = LoraConfig(
+            task_type=TaskType.CAUSAL_LM,
+            inference_mode=False,
+            target_modules=training_args.lora_target.split(','),
+            r=training_args.lora_rank,
+            lora_alpha=training_args.lora_alpha,
+            lora_dropout=training_args.lora_dropout,
+            modules_to_save=training_args.modules_to_save.split(',') if training_args.modules_to_save is not None else None
+        )
+
+        model = get_peft_model(model, peft_config=lora_config)
+    model.print_trainable_parameters()
+
+    return model, tokenizer
+
 
 
 def main():
@@ -234,11 +221,14 @@ def main():
     model_args, data_args, training_args = parser_arguments(logger)
     transformers.set_seed(training_args.seed)
 
+    config_class, tokenizer_class, model_class = MODEL_CLASSES[model_args.model_type]
+    tokenizer = tokenizer_class.from_pretrained(model_args.model_name_or_path, use_fast=model_args.use_fast_tokenizer)
+    tokenizer.pad_token_id = 0 if tokenizer.pad_token_id is None else tokenizer.pad_token_id # set as the <unk> token
+
     model, tokenizer = create_model(model_args, data_args, training_args)
     all_datasets = process_data(model_args, data_args, training_args, tokenizer)
 
-
-    trainer = RMPeftTrainer(
+    trainer = DPOPeftTrainer(
         model=model,
         args=training_args,
         train_dataset=all_datasets['train'] if training_args.do_train else None,
@@ -247,6 +237,7 @@ def main():
         data_collator=PairDataCollatorWithPadding(tokenizer=tokenizer),
         compute_metrics=compute_metrics_for_pair,
     )
+
 
     if training_args.do_train:
         output = trainer.train()

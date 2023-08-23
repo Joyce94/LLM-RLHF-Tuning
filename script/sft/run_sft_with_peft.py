@@ -12,6 +12,7 @@ from datasets import load_dataset,concatenate_datasets
 from itertools import chain
 from utils.trainer import PeftTrainer
 from utils.data_collator import DataCollatorForSupervisedDataset
+from utils.utils import PROMPT_TEMPLATE
 
 logger = logging.getLogger(__name__)
 IGNORE_INDEX = -100
@@ -21,20 +22,15 @@ MODEL_CLASSES = {
 }
 
 
-def main():
 
-    model_args, data_args, training_args = parser_arguments(logger)
-    transformers.set_seed(training_args.seed)
-
+def create_model(model_args, data_args, training_args):
     ## load model 
     config_class, tokenizer_class, model_class = MODEL_CLASSES[model_args.model_type]
     if model_args.tokenizer_name_or_path is None:
         tokenizer = tokenizer_class.from_pretrained(model_args.model_name_or_path, use_fast=model_args.use_fast_tokenizer)
     else:
         tokenizer = tokenizer_class.from_pretrained(model_args.tokenizer_name_or_path, use_fast=model_args.use_fast_tokenizer)
-    # tokenizer.pad_token_id = 0 if tokenizer.pad_token_id is None else tokenizer.pad_token_id # set as the <unk> token
-    if tokenizer.pad_token is None:
-        tokenizer.add_special_tokens(dict(pad_token='<PAD>'))
+    tokenizer.pad_token_id = 0 if tokenizer.pad_token_id is None else tokenizer.pad_token_id # set as the <unk> token
 
     config_kwargs = {
         "trust_remote_code": True,
@@ -57,10 +53,10 @@ def main():
     )
 
     model.resize_token_embeddings(len(tokenizer))
-
+    
     if model_args.peft_path is not None:
         logger.info(f"Load pre-trained model: {model_args.peft_path}" )
-        model = PeftModel.from_pretrained(model, model_args.peft_path)
+        model = PeftModel.from_pretrained(model, model_args.peft_path, is_trainable=True)
     else:
         logger.info("Init new peft model")
         lora_config = LoraConfig(
@@ -76,29 +72,50 @@ def main():
         model = get_peft_model(model, peft_config=lora_config)
     model.print_trainable_parameters()
 
-    def process_tokenize(examples):
-        PROMPT_TEMPLATE = (
-            "Below is an instruction that describes a task. "
-            "Write a response that appropriately completes the request.\n\n"
-            "### Instruction:\n{instruction}\n\n### Response: "
-        )
-        model_inputs = {"input_ids": [], "labels": []}
-        for instruction, input, output in zip(examples['instruction'], examples['input'], examples['output']):
-            if input is not None and input != "":
-                instruction = instruction + '\n' + input 
-            source = PROMPT_TEMPLATE.format_map({'instruction':instruction})
-            source_ids = tokenizer.encode(text=source, add_special_tokens=False)
-            target_ids = tokenizer.encode(text=output, add_special_tokens=False)
+    model.gradient_checkpointing_enable()
+    model.config.use_cache = False
+    
+    return model, tokenizer
 
+
+
+def process_data(model_args, data_args, training_args, tokenizer):
+
+    def process_tokenize(examples):
+        template = PROMPT_TEMPLATE[data_args.template]
+        model_inputs = {"input_ids": [], "label_ids": []}
+        columns = list(examples.keys())
+        
+        for index in range(len(examples[columns[0]])):
+            if 'prompt' not in columns:
+                assert 'instruction' in columns and 'input' in columns and 'output' in columns
+
+                instruction, input, output = examples['instruction'][index], examples['input'][index], examples['output'][index]
+                if input is not None and input != "":
+                    instruction = instruction + '\n' + input 
+                prompt = instruction
+                if len(output) > 1:
+                    response = output[0]
+                else:
+                    response = output 
+            else:
+                assert 'prompt' in columns
+                prompt, response = examples['prompt'][index], examples['chosen'][index]
+                
+            source = template.format_map({'instruction':prompt})
+            source_ids = tokenizer.encode(text=source, add_special_tokens=False)
+            target_ids = tokenizer.encode(text=response, add_special_tokens=False)
+
+            if len(source_ids) > training_args.max_prompt_length:
+                source_ids = source_ids[:training_args.max_prompt_length - 1]
+            if len(target_ids) > training_args.max_response_length:
+                target_ids = target_ids[:training_args.max_response_length - 1]
+                
             input_ids = source_ids + [tokenizer.bos_token_id] + target_ids + [tokenizer.eos_token_id]
             labels = [IGNORE_INDEX] * len(source_ids) + [tokenizer.bos_token_id] + target_ids + [tokenizer.eos_token_id]
 
-            if len(input_ids) > training_args.max_length:
-                input_ids = input_ids[:training_args.max_length]
-                labels = labels[:training_args.max_length]
-
             model_inputs["input_ids"].append(input_ids)
-            model_inputs["labels"].append(labels)
+            model_inputs["label_ids"].append(labels)
         
         return model_inputs
 
@@ -116,12 +133,12 @@ def main():
                     data_files=data_path,
                     cache_dir=data_args.data_cache_dir
                 )
-
+                columns = list(raw_dataset.column_names.values())[0]
                 tokenized_data = raw_dataset.map(
                     process_tokenize,
                     batched=True,
                     num_proc=training_args.dataloader_num_workers,
-                    remove_columns=["instruction","input","output"],
+                    remove_columns=columns,
                     load_from_cache_file=True
                 )
                 all_datasets.append(tokenized_data['train'])
@@ -139,11 +156,12 @@ def main():
                 data_files=data_args.train_file,
                 cache_dir=data_args.data_cache_dir
             )
+            columns = list(raw_train_datasets.column_names.values())[0]
             all_datasets['train'] = raw_train_datasets.map(
                 process_tokenize,
                 batched=True,
                 num_proc=training_args.dataloader_num_workers,
-                remove_columns=["instruction","input","output"],
+                remove_columns=columns,
                 load_from_cache_file=True
             )['train']
             raw_valid_datasets = load_dataset(
@@ -155,7 +173,7 @@ def main():
                 process_tokenize,
                 batched=True,
                 num_proc=training_args.dataloader_num_workers,
-                remove_columns=["instruction","input","output"],
+                remove_columns=columns,
                 load_from_cache_file=True
             )['train']
         else:
@@ -163,7 +181,19 @@ def main():
                 "Dataset file path is not correct. "
                 "You can provide --dataset_dir or provide two files --train_file and --validation_file. "
             )
-        
+    
+    return all_datasets
+
+
+
+def main():
+
+    model_args, data_args, training_args = parser_arguments(logger)
+    transformers.set_seed(training_args.seed)
+
+    model, tokenizer = create_model(model_args, data_args, training_args)
+    all_datasets = process_data(model_args, data_args, training_args, tokenizer)
+
     ### training
     trainer = PeftTrainer(
         model=model,

@@ -1,7 +1,7 @@
 import os,re,sys
 import torch 
 import torch.nn as nn 
-from transformers import AutoConfig,AutoTokenizer,LlamaForCausalLM,LlamaTokenizer,Trainer,AutoModelForCausalLM,get_scheduler,BitsAndBytesConfig,OPTForCausalLM
+from transformers import AutoConfig,AutoTokenizer,LlamaForCausalLM,LlamaTokenizer,Trainer,AutoModelForCausalLM,get_scheduler,BitsAndBytesConfig,OPTForCausalLM,LlamaModel
 import logging 
 from peft import LoraConfig,PeftModel,TaskType,get_peft_model
 from trl import AutoModelForCausalLMWithValueHead
@@ -14,6 +14,7 @@ MODEL_CLASSES = {
     "opt": (AutoConfig, AutoTokenizer, OPTForCausalLM),
     "auto": (AutoConfig, AutoTokenizer, AutoModelForCausalLM),
 }
+
 
 
 def print_trainable_params(model: torch.nn.Module) -> None:
@@ -38,7 +39,7 @@ class PPOEngine():
 
         self.config_kwargs = {
             "trust_remote_code": True,
-            "torch_dtype": model_args.torch_dtype if model_args.torch_dtype in ["auto", None] else getattr(torch,   model_args.torch_dtype),
+            "torch_dtype": model_args.torch_dtype if model_args.torch_dtype in ["auto", None] else getattr(torch, model_args.torch_dtype),
             "low_cpu_mem_usage": True,
         }
         if self.model_args.load_in_4bit:
@@ -77,6 +78,7 @@ class PPOEngine():
             from_tf=bool(".ckpt" in self.model_args.sft_model_path),
             **self.config_kwargs
         )
+        
         model.requires_grad_(False)
         print('*********************sft*******************')
         print_trainable_params(model)
@@ -106,6 +108,7 @@ class PPOEngine():
                     "summary.bias": model_state_dict["v_head.summary.bias"]
                 })
             model = model.merge_and_unload()
+        
         model.requires_grad_(False)
         print('*********************rm*******************')
         print_trainable_params(model)

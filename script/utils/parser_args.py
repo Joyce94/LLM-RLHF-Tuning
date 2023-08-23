@@ -22,7 +22,7 @@ class ModelArguments:
         },
     )
     model_type: Optional[str] = field(
-        default="opt",
+        default="llama",
         metadata={
             "help": (
                 "If training from scratch, pass a model type from the list"
@@ -91,6 +91,12 @@ class DataTrainingArguments:
         default=False, metadata={"help": "Overwrite the cached training and evaluation sets"}
     )
 
+    template: Optional[str] = field(
+        default=None,
+        metadata={
+            "choices": ["chinese_llama_alpaca", "chinese_llama2_alpaca"]
+        }
+    )
     
 
 @dataclass
@@ -101,11 +107,15 @@ class FinetuningArguments(TrainingArguments):
         metadata={"help": "The number of processes to use for the preprocessing."},
     )
     max_length: Optional[int] = field(default=512)
+
+    max_prompt_length: Optional[int] = field(default=256)
+    max_response_length: Optional[int] = field(default=256)
+    min_response_length: Optional[int] = field(default=10)
     
     report_to: Optional[List[str]] = field(
         default=None, 
         metadata={
-            "choices": ["wandb"]
+            "help": "choose from [\"wandb\", None] "
         }
     )
     
@@ -129,10 +139,6 @@ class FinetuningArguments(TrainingArguments):
     
     critic_output_dir: Optional[str] = field(default=None)
 
-    max_prompt_length: Optional[int] = field(default=256)
-    max_response_length: Optional[int] = field(default=256)
-    min_response_length: Optional[int] = field(default=10)
-    
     mini_data_buffer_nums: Optional[int] = field(default=1)
 
     actor_lr: Optional[float] = field(
@@ -150,8 +156,7 @@ class FinetuningArguments(TrainingArguments):
     actor_weight_decay: Optional[float] = field(default=0.)
 
     critic_lr: Optional[float] = field(
-        default=1e-5,
-        metadata={"help": ""}
+        default=1e-5
     )
     critic_lora_rank: Optional[int] = field(default=8)
     critic_lora_dropout: Optional[float] = field(default=0.1)
@@ -201,6 +206,23 @@ class FinetuningArguments(TrainingArguments):
             "choices": ["pretrain", "sft"],
         }
     )
+    
+    ## ppo-max
+    use_advantage_norm: bool = field(default=False)
+    use_reward_scale: bool = field(default=False)
+    use_reward_norm: bool = field(default=False)    
+    max_grad_norm: Optional[float] = field(default=None)
+    
+    
+    ### for dpo
+    dpo_beta: Optional[float] = field(default=1.)
+    average_log_prob: bool = field(default=False)
+    reference_free: bool = field(default=False)
+    
+    ### for ppo_co 
+    use_co_model: bool = field(default=False)
+    use_multi_adapters: bool = field(default=False)
+    
     ## for ds 
     ds_zero_stage: Optional[int] = field(default=3)
     offload: Optional[bool] = field(default=False)
@@ -227,7 +249,7 @@ def parser_arguments(logger) -> Tuple[ModelArguments, DataTrainingArguments, Fin
 
     logger.warning(f"Model args: {model_args}")
     logger.warning(f"Data args: {data_args}")
-    logger.info(f"Training args: {training_args}")
+    logger.warning(f"Training args: {training_args}")
 
     logger.warning(
         f"Process rank: {training_args.local_rank}, device: {training_args.device}, n_gpu: {training_args.n_gpu}"
