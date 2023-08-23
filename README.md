@@ -21,18 +21,18 @@
 | 框架               |      SFT Train     |       RM Train     |       PPO Train    |       DPO Train   |
 | ------------------ | ------------------ | ------------------ | ------------------ | ------------------ |
 | Our                | :white_check_mark: | :white_check_mark: | :white_check_mark: | :white_check_mark: | 
-| [Deepspeed-chat]() | :white_check_mark: | :white_check_mark: | :white_check_mark: |                    |
-| [trl]()            | :white_check_mark: | :white_check_mark: | :white_check_mark: | :white_check_mark: |
-| [MOSS-RLHF]()      |                    |                    | :white_check_mark: |                    |
+| [Deepspeed-chat](https://github.com/microsoft/DeepSpeedExamples/tree/master/applications/DeepSpeed-Chat) | :white_check_mark: | :white_check_mark: | :white_check_mark: |                    |
+| [trl](https://github.com/huggingface/trl)            | :white_check_mark: | :white_check_mark: | :white_check_mark: | :white_check_mark: |
+| [MOSS-RLHF](https://github.com/OpenLMLab/MOSS-RLHF)      |                    |                    | :white_check_mark: |                    |
 
 
 ##### PPO Train 
 | 框架               |     Accelerate     |    Deepspeed       |     Multi LORA     |     最低模型参数量 (7B为例) |
 | ------------------ | ------------------ | ------------------ | ------------------ | ------------------ | 
 | Our                | :white_check_mark: | :white_check_mark: | :white_check_mark: | single model size ～ 7B | 
-| [Deepspeed-chat]() |                    | :white_check_mark: |                    | sft+rm+actor+critic ～ 28B |
-| [trl]()            | :white_check_mark: |            |             | single model size（not use ref model）～ 7B |
-| [MOSS-RLHF]()      | actor model、critic model | sft model、rm model |                    | sft+rm+actor+critic ～ 28B |
+| [Deepspeed-chat](https://github.com/microsoft/DeepSpeedExamples/tree/master/applications/DeepSpeed-Chat) |                    | :white_check_mark: |                    | sft+rm+actor+critic ～ 28B |
+| [trl](https://github.com/huggingface/trl)            | :white_check_mark: |            |             | single model size（not use ref model）～ 7B |
+| [MOSS-RLHF](https://github.com/OpenLMLab/MOSS-RLHF)      | actor model、critic model | sft model、rm model |                    | sft+rm+actor+critic ～ 28B |
 
 
 
