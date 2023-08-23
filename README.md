@@ -12,8 +12,8 @@
 - 支持DPO算法训练模型
 
 ### 更新
-[23/8/23] 支持LLaMA2模型训练；支持DPO训练；支持基于一个基模型、选择一个或两个lora适配器训练PPO、支持accelerate、deepspeed训练
-[23/8/10] 支持LLaMA模型训练；支持基于两个基模型、两个lora的适配器训练PPO；支持accelerate分布式训练
+- [23/8/23] 支持LLaMA2模型训练；支持DPO训练；支持基于一个基模型、选择一个或两个lora适配器训练PPO、支持accelerate、deepspeed训练
+- [23/8/10] 支持LLaMA模型训练；支持基于两个基模型、两个lora的适配器训练PPO；支持accelerate分布式训练
 
 
 ### 功能
