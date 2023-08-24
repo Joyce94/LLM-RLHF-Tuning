@@ -34,7 +34,6 @@ def process_data(model_args, data_args, training_args, tokenizer):
     def process_tokenize(examples):
         model_inputs = {"input_ids": [], "label_ids": []} 
         columns = list(examples.keys())
-        # logger.info(f"columns: {columns}")
         template = PROMPT_TEMPLATE[data_args.template]
         
         for index in range(len(examples[columns[0]])):
@@ -181,19 +180,6 @@ def create_model(model_args, data_args, training_args):
 
     model.resize_token_embeddings(len(tokenizer))
     
-    # if hasattr(model, "enable_input_require_grads"):
-    #         model.enable_input_require_grads()
-    # else:
-    #     def make_inputs_require_grad(module, input, output):
-    #         output.requires_grad_(True)
-    #     model.get_input_embeddings().register_forward_hook(make_inputs_require_grad)
-
-    # model.enable_input_require_grads()
-    # model.gradient_checkpointing_enable()
-    # # model.lm_head = CastOutputToFloat(model.lm_head)        # ??????????   
-    # model.config.use_cache = False
-
-
     if model_args.peft_path is not None:
         logger.info(f"Load pre-trained model: {model_args.peft_path}" )
         model = PeftModel.from_pretrained(model, model_args.peft_path)

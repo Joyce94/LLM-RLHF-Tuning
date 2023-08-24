@@ -94,20 +94,8 @@ class PPOPeftTrainer(Trainer):
         self.tokenizer = tokenizer
         
         self.is_distributed = self.accelerator.distributed_type == "MULTI_GPU"
-        if self.is_distributed:
-            self.device = self.accelerator.device
-        else:
-            self.device = torch.device("cuda:0")
-        
-        # self.is_deepspeed_enabled = getattr(self.accelerator.state, "deepspeed_plugin", None) is not None
-        # if self.is_deepspeed_enabled:
-        #     if getattr(self.args, "hf_deepspeed_config", None) is None:
-        #         from transformers.deepspeed import HfTrainerDeepSpeedConfig
-        #         ds_plugin = self.accelerator.state.deepspeed_plugin
+        self.device = self.accelerator.device
 
-        #         ds_plugin.hf_ds_config = HfTrainerDeepSpeedConfig(ds_plugin.hf_ds_config.config)
-        #         ds_plugin.deepspeed_config = ds_plugin.hf_ds_config.config
-        #         ds_plugin.hf_ds_config.trainer_config_process(self.args)
         self.ppl_loss_fct = torch.nn.CrossEntropyLoss(reduction='none')
 
         self.model = PPOModel(actor_model, critic_model)
