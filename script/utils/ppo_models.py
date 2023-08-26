@@ -79,7 +79,7 @@ class PPOEngine():
         )
         
         if self.model_args.actor_peft_path is not None:
-            model = PeftModel.from_pretrained(model, self.model_args.actor_peft_path)
+            model = PeftModel.from_pretrained(model, self.model_args.actor_peft_path, is_trainable=True)
         else:
             lora_config = LoraConfig(
                 task_type=TaskType.CAUSAL_LM,
@@ -109,7 +109,7 @@ class PPOEngine():
         model = model.merge_and_unload()
 
         if self.model_args.critic_peft_path is not None:
-            model = PeftModel.from_pretrained(model, self.model_args.critic_peft_path, adapter_name="default")
+            model = PeftModel.from_pretrained(model, self.model_args.critic_peft_path, adapter_name="default", is_trainable=True)
 
         else:
             lora_config = LoraConfig(
