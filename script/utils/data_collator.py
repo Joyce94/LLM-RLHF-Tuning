@@ -71,7 +71,7 @@ class PPODataCollatorWithPadding(DataCollatorWithPadding):
         )
         return dict(
             input_ids=input_ids.flip(1),   
-            attention_mask=input_ids.ne(self.tokenizer.pad_token_id).flip(1),
+            attention_mask=input_ids.ne(self.tokenizer.pad_token_id).flip(1).long(),
         )   # prompt 倒序 
 
         

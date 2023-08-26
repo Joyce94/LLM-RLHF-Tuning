@@ -72,9 +72,6 @@ def create_model(model_args, data_args, training_args):
         model = get_peft_model(model, peft_config=lora_config)
     model.print_trainable_parameters()
 
-    model.gradient_checkpointing_enable()
-    model.config.use_cache = False
-    
     return model, tokenizer
 
 

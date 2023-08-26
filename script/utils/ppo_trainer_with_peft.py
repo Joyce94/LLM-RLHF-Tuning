@@ -21,16 +21,29 @@ WEIGHTS_NAME = "adapter_model.bin"
 TRAINING_ARGS_NAME = "training_args.bin"
 
 
+class PPOModel(nn.Module):
+    # see from: https://github.com/huggingface/accelerate/issues/668
+    def __init__(self, actor_model, critic_model):
+        super().__init__()
+        self.actor_model = actor_model 
+        self.critic_model = critic_model 
+    
+    def forward(self, sequences, extra_inputs=None):
+        actor_logits = self.actor_model(**sequences, return_dict=True).logits
+        critic_values = self.critic_model(**sequences)[-1]
+        if extra_inputs is not None:
+            extra_loss = self.actor_model(**extra_inputs, return_dict=True).loss
+        else:
+            extra_loss = 0.0  
+        return actor_logits, critic_values, extra_loss
+    
+    
 
 class PPOPeftTrainer(Trainer):
     def __init__(
         self, 
         args = None, 
-        sft_model = None, 
-        reward_model = None,
-        actor_model = None,
-        critic_model = None,
-        co_model = None,
+        ppo_engine = None, 
         data_collator = None,
         train_dataset = None,
         tokenizer = None,
@@ -40,11 +53,12 @@ class PPOPeftTrainer(Trainer):
         **kwargs
     ):
         self.args = args 
-        self.actor_model = actor_model 
-        self.critic_model = critic_model
-        self.sft_model = sft_model
-        self.reward_model = reward_model
-        self.co_model = co_model
+        if args.use_co_model:
+            self.co_model = ppo_engine.model 
+        else:
+            self.actor_model = ppo_engine.actor_model 
+            self.critic_model = ppo_engine.critic_model
+            self.model = PPOModel(self.actor_model, self.critic_model)
 
         self.accelerator = Accelerator(
             gradient_accumulation_steps=self.args.gradient_accumulation_steps,
@@ -80,12 +94,17 @@ class PPOPeftTrainer(Trainer):
         
         self.tokenizer = tokenizer
         
-        
         self.is_distributed = self.accelerator.distributed_type == "MULTI_GPU"
         self.device = self.accelerator.device
 
         self.is_deepspeed_enabled = getattr(self.accelerator.state, "deepspeed_plugin", None) is not None
         if self.is_deepspeed_enabled:
+            
+            if not self.args.use_co_model:
+                raise PermissionError(
+                    "if you use deepspeed_plugin, you need to provide one model."
+                )
+                
             if getattr(self.args, "hf_deepspeed_config", None) is None:
                 from transformers.deepspeed import HfTrainerDeepSpeedConfig
                 ds_plugin = self.accelerator.state.deepspeed_plugin
@@ -95,12 +114,6 @@ class PPOPeftTrainer(Trainer):
                 ds_plugin.hf_ds_config.trainer_config_process(self.args)
 
 
-
-        ## create optimizer and scheduler 
-        self.optimizer, self.lr_scheduler = optimizers
-        if self.optimizer is None:
-            self.optimizer = self.create_optimizer(self.co_model, self.args.learning_rate, self.args.weight_decay)
-        
         ## get max_update_steps for lr_scheduler 
         if self.extra_train_dataloader is None:
             self.max_dataloader_iters = len(self.dataloader)
@@ -108,10 +121,22 @@ class PPOPeftTrainer(Trainer):
             self.max_dataloader_iters = min(len(self.dataloader), len(self.extra_train_dataloader))
         self.num_update_steps_per_epoch, self.max_update_steps = self.get_max_update_steps(args, self.max_dataloader_iters)
         
+        
+        ## create optimizer and scheduler 
+        self.optimizer, self.lr_scheduler = optimizers
+        if self.optimizer is None:
+            self.optimizer = self.create_optimizer()
+        
         if self.lr_scheduler is None:
             self.lr_scheduler = self.create_scheduler(self.optimizer, max_update_steps=self.max_update_steps)
 
-        self.co_model, self.optimizer, self.lr_scheduler = self.accelerator.prepare(self.co_model, self.optimizer, self.lr_scheduler)
+        if self.args.use_co_model:
+            self.co_model, self.optimizer, self.lr_scheduler = self.accelerator.prepare(self.co_model, self.optimizer, self.lr_scheduler)
+        else:
+            self.model, self.optimizer, self.lr_scheduler = self.accelerator.prepare(self.model, self.optimizer, self.lr_scheduler)
+            self.ator_model = self.accelerator.unwrap_model(self.model).actor_model 
+            self.critic_model = self.accelerator.unwrap_model(self.model).critic_model
+            
 
         
     def get_max_update_steps(self, args, dataloader_nums):
@@ -137,8 +162,13 @@ class PPOPeftTrainer(Trainer):
         return params
     
     
-    def create_optimizer(self, model, lr, weight_decay):
-        params = self.get_parms(model, lr, weight_decay)
+    def create_optimizer(self):
+        if self.args.use_co_model:
+            params = self.get_parms(self.co_model, self.args.learning_rate, self.args.weight_decay)
+        else:
+            params = self.get_parms(self.actor_model, self.args.actor_lr, self.args.actor_weight_decay)
+            params.extend(self.get_parms(self.critic_model, self.args.critic_lr, self.args.critic_weight_decay))
+
         optimizer = AdamW(params, betas=(0.9,0.95))
         
         return optimizer
@@ -173,6 +203,19 @@ class PPOPeftTrainer(Trainer):
         return whitened
 
 
+    def unwrap_model(self, model: nn.Module) -> nn.Module:
+        """
+        Recursively unwraps a model from potential containers (as used in distributed training).
+
+        Args:
+            model (`torch.nn.Module`): The model to unwrap.
+        """
+        # since there could be multiple levels of wrapping, unwrap recursively
+        if hasattr(model, "module"):
+            return self.unwrap_model(model.module)
+        else:
+            return model
+
     @torch.no_grad()
     def generate(
         self,
@@ -188,22 +231,31 @@ class PPOPeftTrainer(Trainer):
             "min_new_tokens": self.args.min_response_length, 
             "_from_model_config": False
         }
-        unwrapped_model = self.accelerator.unwrap_model(self.co_model)
         
-        if isinstance(unwrapped_model, nn.parallel.DistributedDataParallel):
-            unwrapped_model = unwrapped_model.module
-        if isinstance(unwrapped_model, AutoModelForCausalLMWithValueHead):
-            unwrapped_model = unwrapped_model.pretrained_model
+        if self.args.use_co_model:
+            unwrapped_model = self.accelerator.unwrap_model(self.co_model)
             
-        if not hasattr(unwrapped_model, "generation_config"):
-            raise AttributeError(
-                f" model object [{unwrapped_model.__class__.__name__}] has no attribute [generation_config] "
-            )
+            if self.unwrap_model(unwrapped_model) is not unwrapped_model:
+                unwrapped_model = self.unwrap_model(unwrapped_model)
+
+            if isinstance(unwrapped_model, AutoModelForCausalLMWithValueHead):
+                unwrapped_model = unwrapped_model.pretrained_model
                 
-        if unwrapped_model.generation_config._from_model_config:
-            unwrapped_model.generation_config._from_model_config = False
-        sequences = unwrapped_model.generate(inputs=prompts_ids, **gen_kwargs)
-        
+            if not hasattr(unwrapped_model, "generation_config"):
+                raise AttributeError(
+                    f" model object [{unwrapped_model.__class__.__name__}] has no attribute [generation_config] "
+                )
+                    
+            if unwrapped_model.generation_config._from_model_config:
+                unwrapped_model.generation_config._from_model_config = False
+            sequences = unwrapped_model.generate(inputs=prompts_ids, **gen_kwargs)
+        else:
+            if self.actor_model.generation_config._from_model_config:   
+                self.actor_model.generation_config._from_model_config = False
+
+            sequences = self.actor_model.generate(inputs=prompts_ids, **gen_kwargs)
+            
+            
         if not return_prompt:
             return sequences[:, prompts_ids.shape[1] :]
         
@@ -326,24 +378,10 @@ class PPOPeftTrainer(Trainer):
             responses_mask.append(response_mask)
         return torch.stack(responses_mask)
 
-    
+
+
     @torch.no_grad()
-    def get_experience_data(self, prompts_ids):
-
-        responses_ids = self.generate(prompts_ids, return_prompt=False)
-        prompts_without_padding, responses_without_padding, sequences = self.process_sequences(prompts_ids, responses_ids)
-        
-        ### 不同进程填充      
-        if self.is_distributed:
-            pad_first = self.tokenizer.padding_side == "left"
-
-            sequences["input_ids"] = self.accelerator.pad_across_processes(
-                sequences["input_ids"], dim=1, pad_index=self.tokenizer.pad_token_id, pad_first=pad_first
-            )
-            sequences["attention_mask"] = self.accelerator.pad_across_processes(
-                sequences["attention_mask"], dim=1, pad_index=0, pad_first=pad_first
-            )
-        
+    def get_co_model_output(self, sequences):
         unwrap_model = self.accelerator.unwrap_model(self.co_model)
         actor_logits, _, critic_values = unwrap_model(**sequences, return_dict=True)
  
@@ -367,6 +405,55 @@ class PPOPeftTrainer(Trainer):
             ref_values = unwrap_model(**sequences)[-1]
             ## back to critic model v_head 
             unwrap_model.v_head.load_state_dict({"summary.weight": getattr(unwrap_model, "critic_head_weight"), "summary.bias": getattr(unwrap_model, "critic_head_bias")})
+        
+        return actor_logits, critic_values, ref_logits, ref_values
+        
+        
+        
+    @torch.no_grad()
+    def get_model_output(self, sequences):
+        
+        actor_logits, critic_values, _ = self.model(sequences)  
+        with self.actor_model.disable_adapter():
+            ## the same as sft model 
+            ref_logits = self.actor_model(**sequences, return_dict=True).logits
+            
+        with self.critic_model.pretrained_model.disable_adapter():
+            ## the same as reward model 
+            ## save current critic model v_head 
+            v_head_stat_dict = self.critic_model.v_head.state_dict()
+            setattr(self.critic_model, "critic_head_weight", v_head_stat_dict["summary.weight"])
+            setattr(self.critic_model, "critic_head_bias", v_head_stat_dict["summary.bias"])
+            ## change to reward model v_head
+            self.critic_model.v_head.load_state_dict({"summary.weight": getattr(self.critic_model, "reward_head_weight"), "summary.bias": getattr(self.critic_model, "reward_head_bias")})
+
+            ref_values = self.critic_model(**sequences)[-1]
+            ## back to critic model v_head 
+            self.critic_model.v_head.load_state_dict({"summary.weight": getattr(self.critic_model, "critic_head_weight"), "summary.bias": getattr(self.critic_model, "critic_head_bias")})
+        
+        return actor_logits, critic_values, ref_logits, ref_values
+        
+        
+    def get_experience_data(self, prompts_ids):
+
+        responses_ids = self.generate(prompts_ids, return_prompt=False)
+        prompts_without_padding, responses_without_padding, sequences = self.process_sequences(prompts_ids, responses_ids)
+        
+        ### 不同进程填充      
+        if self.is_distributed:
+            pad_first = self.tokenizer.padding_side == "left"
+
+            sequences["input_ids"] = self.accelerator.pad_across_processes(
+                sequences["input_ids"], dim=1, pad_index=self.tokenizer.pad_token_id, pad_first=pad_first
+            )
+            sequences["attention_mask"] = self.accelerator.pad_across_processes(
+                sequences["attention_mask"], dim=1, pad_index=0, pad_first=pad_first
+            )
+        
+        if self.args.use_co_model:
+            actor_logits, critic_values, ref_logits, ref_values = self.get_co_model_output(sequences)
+        else:
+            actor_logits, critic_values, ref_logits, ref_values = self.get_model_output(sequences)
         
         
         actor_log_probs = self.get_log_probs(actor_logits[:, :-1, :], sequences["input_ids"][:, 1:]) 
@@ -461,48 +548,47 @@ class PPOPeftTrainer(Trainer):
 
 
     def save_checkpoint(self, model, output_dir, step, adapter_name="default", state_dict=None):
-        unwrapped_model = self.accelerator.unwrap_model(model)
-        
-        if isinstance(unwrapped_model, nn.parallel.DistributedDataParallel):
-            unwrapped_model = unwrapped_model.module
+
+        if self.unwrap_model(model) is not model:
+            model = self.unwrap_model(model)
             
         output_dir = os.path.join(output_dir, f"checkpoint-{step}")
         logger.info(f"Saving model checkpoint to {output_dir}")
         os.makedirs(output_dir, exist_ok=True)
 
         if state_dict is None:
-            if hasattr(unwrapped_model, "v_head"):
-                state_dict = self.get_state_dict(unwrapped_model)
+            if hasattr(model, "v_head"):
+                state_dict = self.get_state_dict(model)
             else:
-                state_dict = unwrapped_model.state_dict()
+                state_dict = model.state_dict()
 
-        if isinstance(unwrapped_model, PreTrainedModel):  
-            unwrapped_model.save_pretrained(output_dir, state_dict=state_dict)
+        if isinstance(model, PreTrainedModel):  
+            model.save_pretrained(output_dir, state_dict=state_dict)
         else:
             logger.info("Trainer.model is not a `PreTrainedModel`, only saving its state dict.")
-            if hasattr(unwrapped_model, "peft_config"):
-                adapter_state_dict = get_peft_model_state_dict(unwrapped_model, state_dict, adapter_name=adapter_name)
-            elif isinstance(unwrapped_model, AutoModelForCausalLMWithValueHead):
-                adapter_state_dict = get_peft_model_state_dict(unwrapped_model.pretrained_model, state_dict, adapter_name=adapter_name)
+            if hasattr(model, "peft_config"):
+                adapter_state_dict = get_peft_model_state_dict(model, state_dict, adapter_name=adapter_name)
+            elif isinstance(model, AutoModelForCausalLMWithValueHead):
+                adapter_state_dict = get_peft_model_state_dict(model.pretrained_model, state_dict, adapter_name=adapter_name)
 
-            if hasattr(unwrapped_model, "v_head"):
+            if hasattr(model, "v_head"):
                 ### add v_head (v_head not in modules_to_save)
-                v_head_state_dict = unwrapped_model.v_head.state_dict()
+                v_head_state_dict = model.v_head.state_dict()
                 for k, v in v_head_state_dict.items():
                     adapter_state_dict[f"v_head.{k}"] = v 
             torch.save(adapter_state_dict, os.path.join(output_dir, WEIGHTS_NAME))
                 
         try:
-            if hasattr(unwrapped_model, "peft_config"):
-                unwrapped_model.peft_config.save_pretrained(output_dir)
-            elif isinstance(unwrapped_model, AutoModelForCausalLMWithValueHead):
-                unwrapped_model.pretrained_model.peft_config.save_pretrained(output_dir)
+            if hasattr(model, "peft_config"):
+                model.peft_config.save_pretrained(output_dir)
+            elif isinstance(model, AutoModelForCausalLMWithValueHead):
+                model.pretrained_model.peft_config.save_pretrained(output_dir)
 
         except AttributeError:
-            if hasattr(unwrapped_model, "peft_config"):
-                unwrapped_model.peft_config[adapter_name].save_pretrained(output_dir)
+            if hasattr(model, "peft_config"):
+                model.peft_config[adapter_name].save_pretrained(output_dir)
             else:
-                unwrapped_model.pretrained_model.peft_config[adapter_name].save_pretrained(output_dir)
+                model.pretrained_model.peft_config[adapter_name].save_pretrained(output_dir)
 
 
         if self.tokenizer is not None:
@@ -611,16 +697,21 @@ class PPOPeftTrainer(Trainer):
         responses_mask = batch_mini_data["responses_mask"]
         sequences = {"input_ids": batch_mini_data["sequences_ids"], "attention_mask": batch_mini_data["sequences_mask"]}
 
-        with self.accelerator.accumulate(self.co_model):
-            unwrap_model = self.accelerator.unwrap_model(self.co_model)
-            mini_batch_actor_logits, _, mini_batch_critic_values = unwrap_model(**sequences, return_dict=True)
-            _, extra_loss, _ = unwrap_model(**extra_inputs, return_dict=True)
+        if self.args.use_co_model:
+            with self.accelerator.accumulate(self.co_model):
+                unwrap_model = self.accelerator.unwrap_model(self.co_model)
+                mini_batch_actor_logits, _, mini_batch_critic_values = unwrap_model(**sequences, return_dict=True)
+                _, extra_loss, _ = unwrap_model(**extra_inputs, return_dict=True)
+                
+                if self.args.use_multi_adapters:
+                    unwrap_model.pretrained_model.set_adapter("critic")
+                    mini_batch_critic_values = unwrap_model(**sequences, return_dict=True)[-1]
+                    unwrap_model.pretrained_model.set_adapter("default")
+        else:
+            with self.accelerator.accumulate(self.model):
+                mini_batch_actor_logits, mini_batch_critic_values, extra_loss = self.model(sequences, extra_inputs)
             
-            if self.args.use_multi_adapters:
-                unwrap_model.pretrained_model.set_adapter("critic")
-                mini_batch_critic_values = unwrap_model(**sequences, return_dict=True)[-1]
-                unwrap_model.pretrained_model.set_adapter("default")
-
+                
         mini_batch_actor_log_probs = self.get_log_probs(mini_batch_actor_logits[:, :-1, :], batch_mini_data["sequences_ids"][:, 1:]) 
         entropy = self.get_entropy(mini_batch_actor_logits[:, :-1, :], responses_mask[:, 1:])
         
@@ -637,8 +728,13 @@ class PPOPeftTrainer(Trainer):
         self.accelerator.backward(loss)
         
         if self.args.max_grad_norm is not None:
+            if self.args.use_co_model:
+                params = [p for n, p in self.co_model.named_parameters() if p.requires_grad]
+            else:
+                params = [p for n, p in self.actor_model.named_parameters() if p.requires_grad] + [p for n, p in self.critic_model.named_parameters() if p.requires_grad]
+                
             torch.nn.utils.clip_grad_norm_(
-                parameters=[p for n, p in self.co_model.named_parameters() if p.requires_grad],
+                parameters=params,
                 max_norm=self.args.max_grad_norm
             )
         
@@ -741,9 +837,15 @@ class PPOPeftTrainer(Trainer):
                             if update_steps > 0 and (update_steps % self.args.save_steps) == 0:
                                 
                                 if self.is_world_process_zero():
-                                    self.save_checkpoint(self.co_model, self.args.output_dir, int(update_steps), adapter_name="default")
-                                    if self.args.use_multi_adapters:
-                                        self.save_checkpoint(self.co_model, self.args.critic_output_dir, int(update_steps), adapter_name="critic")
+                                    if self.args.use_co_model:
+                                        unwrapped_model = self.accelerator.unwrap_model(self.co_model)
+                                        self.save_checkpoint(unwrapped_model, self.args.output_dir, int(update_steps))
+                                        if self.args.use_multi_adapters:
+                                            self.save_checkpoint(unwrapped_model, self.args.critic_output_dir, int(update_steps), adapter_name="critic")
+                                    else:
+                                        self.save_checkpoint(self.actor_model, self.args.output_dir, int(update_steps))
+                                        self.save_checkpoint(self.critic_model, self.args.critic_output_dir, int(update_steps))
+
 
                         random.shuffle(mini_dataset) 
                         torch.cuda.empty_cache()

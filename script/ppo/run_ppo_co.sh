@@ -1,18 +1,17 @@
-
 sft_model_path=chinese_alpaca_path
 reward_lora_path=rm_lora_path
 peft_path=output_dir_rlhf
 
 dataset_dir=/root/LLM-RLHF-Tuning/sft_data
-extra_dataset_dir=/root/LLaMA-Tuning/pt_data
+extra_dataset_dir=/root/LLM-RLHF-Tuning/pt_data
 lora_trainable="q_proj,v_proj,k_proj,o_proj,gate_proj,down_proj,up_proj"    
 
 output_dir=output_dir_rlhf
 
-
-accelerate launch --config_file ds_config.yaml run_ppo_with_peft.py \
+accelerate launch --config_file default_config.yaml run_ppo_with_peft.py \
     --model_type llama \
     --template "chinese_llama2_alpaca" \
+    --use_co_model True \
     --sft_model_path ${sft_model_path} \
     --reward_lora_path ${reward_lora_path} \
     --dataset_dir ${dataset_dir} \
@@ -26,14 +25,14 @@ accelerate launch --config_file ds_config.yaml run_ppo_with_peft.py \
     --lr_scheduler_type cosine \
     --learning_rate 1e-4 \
     --weight_decay 0 \
-    --logging_steps 100 \
-    --save_steps 100 \
+    --logging_steps 10 \
+    --save_steps 10 \
     --dataloader_num_workers 16 \
     --block_size 256 \
     --max_prompt_length 256 \
-    --max_response_length 512 \
+    --max_response_length 256 \
     --output_dir ${output_dir} \
-    --lora_rank 32 \
+    --lora_rank 64 \
     --lora_alpha 32 \
     --lora_target ${lora_trainable} \
     --lora_dropout 0.05 \

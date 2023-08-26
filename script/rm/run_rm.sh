@@ -7,6 +7,7 @@ output_dir=rm_lora_path
 
 torchrun --nnodes 1 --nproc_per_node 1 run_rm_with_peft.py \
     --model_type llama \
+    --template "chinese_llama2_alpaca" \
     --model_name_or_path ${pretrained_model} \
     --dataset_dir ${dataset_dir} \
     --split_ratio 0.01 \
@@ -19,7 +20,8 @@ torchrun --nnodes 1 --nproc_per_node 1 run_rm_with_peft.py \
     --seed 512 \
     --fp16 \
     --num_train_epochs 1 \
-    --max_length 512 \
+    --max_prompt_length 512 \
+    --max_response_length 512 \
     --clm_loss_weight 1.0 \
     --use_last_reward \
     --learning_rate 1e-5 \

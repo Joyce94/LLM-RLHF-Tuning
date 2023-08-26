@@ -9,6 +9,7 @@ modules_to_save=None
 
 torchrun --nnodes 1 --nproc_per_node 1 run_sft_with_peft.py \
     --model_type llama \
+    --template "chinese_llama2_alpaca" \
     --model_name_or_path ${pretrained_model} \
     --dataset_dir ${dataset_dir} \
     --split_ratio 0.01 \
@@ -23,7 +24,9 @@ torchrun --nnodes 1 --nproc_per_node 1 run_sft_with_peft.py \
     --seed 512 \
     --fp16 \
     --num_train_epochs 1 \
-    --logging_steps 10 \
+    --max_prompt_length 512 \
+    --max_response_length 512 \
+    --logging_steps 100 \
     --eval_steps 100 \
     --save_steps 500 \
     --learning_rate 1e-4 \
@@ -38,10 +41,9 @@ torchrun --nnodes 1 --nproc_per_node 1 run_sft_with_peft.py \
     --overwrite_output_dir \
     --ddp_timeout 30000 \
     --logging_first_step True \
-    --lora_rank 8 \
+    --lora_rank 128 \
     --lora_alpha 32 \
     --lora_target ${lora_trainable} \
     --lora_dropout 0.05 \
-    --modules_to_save ${modules_to_save} \
     --torch_dtype float16 \
     --report_to "wandb"

@@ -213,6 +213,7 @@ class FinetuningArguments(TrainingArguments):
     use_reward_norm: bool = field(default=False)    
     max_grad_norm: Optional[float] = field(default=None)
     
+    # use_reward_v_head_init: bool = field(default=True)
     
     ### for dpo
     dpo_beta: Optional[float] = field(default=1.)

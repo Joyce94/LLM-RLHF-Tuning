@@ -12,6 +12,7 @@ critic_lora_trainable="q_proj,v_proj,k_proj,o_proj,gate_proj,down_proj,up_proj"
 actor_output_dir=output_dir_rlhf_actor
 critic_output_dir=output_dir_rlhf_critic
 
+
 accelerate launch --config_file default_config.yaml run_ppo_with_peft.py \
     --model_type llama \
     --template "chinese_llama2_alpaca" \
@@ -19,8 +20,8 @@ accelerate launch --config_file default_config.yaml run_ppo_with_peft.py \
     --reward_lora_path ${reward_lora_path} \
     --dataset_dir ${dataset_dir} \
     --extra_dataset_dir ${extra_dataset_dir} \
-    --per_device_train_batch_size 2 \
-    --per_device_mini_train_batch_size 2 \
+    --per_device_train_batch_size 1 \
+    --per_device_mini_train_batch_size 1 \
     --gradient_accumulation_steps 8 \
     --do_train \
     --num_train_epochs 1 \
@@ -33,7 +34,7 @@ accelerate launch --config_file default_config.yaml run_ppo_with_peft.py \
     --dataloader_num_workers 16 \
     --block_size 256 \
     --max_prompt_length 256 \
-    --max_response_length 512 \
+    --max_response_length 256 \
     --output_dir ${actor_output_dir} \
     --critic_output_dir ${critic_output_dir} \
     --actor_lora_rank 64 \
@@ -48,16 +49,15 @@ accelerate launch --config_file default_config.yaml run_ppo_with_peft.py \
     --gamma 1 \
     --lam 0.95 \
     --kl_penalty_beta 0.02 \
-    --use_last_reward \
-    --reward_score_clip 10 \
+    --kl_penalty_method "abs" \
     --value_clip 0.2 \
     --ratio_clip 0.2 \
     --actor_loss_weight 1 \
     --critic_loss_weight 1 \
     --extra_loss_weight 0.2 \
     --extra_warmup_steps_ratio 0.2 \
-    --entropy_beta 0.0 \
-    --kl_loss_alpha 0.0 \
+    --entropy_beta 1.0 \
+    --use_advantage_norm \
     --report_to "wandb" \
     --torch_dtype float16 \
     --fp16
