@@ -103,9 +103,9 @@ def process_data(model_args, data_args, training_args, tokenizer):
             source_ids = tokenizer.encode(text=source, add_special_tokens=False)
             target_ids = tokenizer.encode(text=response, add_special_tokens=False)
 
-            if len(source_ids) > training_args.max_prompt_length:
+            if len(source_ids) > training_args.max_prompt_length - 1:
                 source_ids = source_ids[:training_args.max_prompt_length - 1]
-            if len(target_ids) > training_args.max_response_length:
+            if len(target_ids) > training_args.max_response_length - 1:
                 target_ids = target_ids[:training_args.max_response_length - 1]
                 
             input_ids = source_ids + [tokenizer.bos_token_id] + target_ids + [tokenizer.eos_token_id]

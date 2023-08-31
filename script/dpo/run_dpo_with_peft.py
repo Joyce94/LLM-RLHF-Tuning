@@ -54,11 +54,11 @@ def process_data(model_args, data_args, training_args, tokenizer):
             accepts_ids = tokenizer.encode(text=chosen, add_special_tokens=False)
             rejects_ids = tokenizer.encode(text=rejected, add_special_tokens=False)
 
-            if len(source_ids) > training_args.max_prompt_length:
+            if len(source_ids) > training_args.max_prompt_length - 1:
                 source_ids = source_ids[:training_args.max_prompt_length - 1]
-            if len(accepts_ids) > training_args.max_response_length:
+            if len(accepts_ids) > training_args.max_response_length - 1:
                 accepts_ids = accepts_ids[:training_args.max_response_length - 1]
-            if len(rejects_ids) > training_args.max_response_length:
+            if len(rejects_ids) > training_args.max_response_length - 1:
                 rejects_ids = rejects_ids[:training_args.max_response_length - 1]
                 
             
