@@ -1,6 +1,6 @@
 # LLM-RLHF-Tuning
 
-本项目从零实现了RLHF三阶段训练，并在文档中详细写了实现细节，欢迎大家交流讨论[WeChat](assets/RLHF讨论群.jpeg)
+本项目从零实现了RLHF三阶段训练，并在文档中详细写了实现细节，欢迎大家交流讨论[WeChat](assets/RLHF讨论群.png)
 
 ### 主要内容：
 - 支持指令微调Alpaca模型
@@ -92,7 +92,7 @@ deepspeed==0.10.0
 - [ ] 支持QLoRA训练
 
 
-欢迎加群讨论 [WeChat](assets/RLHF讨论群.jpeg)
+欢迎加群讨论 [WeChat](assets/RLHF讨论群.png)
 
 
 
